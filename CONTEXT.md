@@ -12,14 +12,21 @@
 - Engine: SQLite (local dev) → PostgreSQL/Supabase (production)
 - File: data/nems_master.db
 - Rows: 130,704 | Range: 2019-01-01 → 2026-06-16 | Coverage: 99.96%
-- Schema: nems_prices, forecast_sources, forecast_data, model_registry
+- Schema: nems_prices, forecast_sources, forecast_data, model_registry,
+          forecast_actuals (Phase 4), gas_prices (Phase 4)
 
 ## Phase Status
 - [x] Phase 1: Scaffold, DB ingestion, bootstrap, Streamlit app (dark theme)
-- [~] Phase 2: Analysis module, Duck Curve, Dispatch/Arbitrage, Market Overview
-- [ ] Phase 3: Forecasting (XGBoost, Prophet, SARIMA)
-- [ ] Phase 4: EMC scraper (Playwright, local macOS only)
-- [ ] Phase 5: Multi-source scenario comparison + Streamlit Cloud deployment
+- [x] Phase 2: Analysis module, Duck Curve, Dispatch/Arbitrage, Market Overview
+- [x] Phase 3: Forecasting — XGBoost + Prophet + Ensemble, backtest, pages/03_Forecast.py
+- [x] Phase 4: Market Intelligence Hub
+  - [x] Module 1: forecast_actuals table, check_model_drift, save_predictions_to_db, ingest_and_retrain
+  - [x] Module 2: gas_prices table, ingest_gas_prices, gas_usep_correlation (lag analysis)
+  - [x] Module 3: ingest_analyst_forecast (granularity expansion), analyst_vs_actuals, vintage_comparison
+  - [x] Module 4: get_sg_calendar_features, day_type_usep_profile
+  - [x] Module 5: pages/06_Data_Hub.py (5 sections)
+  - [x] Module 6: 3-tab forecast (Short-term / Medium-term / Monthly Scenarios), forecast_monthly_scenarios
+- [ ] Phase 5: EMC scraper (Playwright), Streamlit Cloud deployment
 
 ## Technical Stack
 - Python 3.14 / Streamlit 1.58 / Plotly 6.8 / SQLAlchemy 2.0 / pandas 3.0
@@ -74,4 +81,4 @@ This spread × contracted volume = incremental annual revenue above CfD floor
 - Available BESS dispatch window = periods where solar > contracted delivery profile
 
 ## Last Updated
-2026-06-24 19:18 UTC
+2026-06-25 (Phase 4 complete)

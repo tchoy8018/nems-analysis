@@ -277,3 +277,249 @@ def yoy_monthly_comparison(engine, month: int) -> pd.DataFrame:
         ).fetchall()
 
     return pd.DataFrame(rows, columns=["year", "avg_usep", "period_count"])
+
+
+# ---------------------------------------------------------------------------
+# 8. Gas price ↔ USEP correlation  (Phase 4)
+# ---------------------------------------------------------------------------
+
+def gas_usep_correlation(engine, lag_days: list[int] | None = None) -> dict:
+    """
+    Compute Pearson r, Spearman rho, and R² between gas JKM price and
+    daily-average USEP at multiple lags.
+
+    Returns {
+        "by_lag":   list of {lag, pearson_r, spearman_rho, r2, n_obs},
+        "rolling":  DataFrame with date, corr_30d (rolling 30-day Pearson on lag=0)
+    }
+    """
+    if lag_days is None:
+        lag_days = [0, 1, 3, 7, 14]
+
+    # Daily avg USEP
+    with engine.connect() as conn:
+        usep_rows = conn.execute(text("""
+            SELECT date, AVG(usep) AS avg_usep
+            FROM nems_prices
+            WHERE usep IS NOT NULL
+            GROUP BY date
+            ORDER BY date
+        """)).fetchall()
+        gas_rows = conn.execute(text("""
+            SELECT price_date, jkm_usd_mmbtu
+            FROM gas_prices
+            WHERE jkm_usd_mmbtu IS NOT NULL
+            ORDER BY price_date
+        """)).fetchall()
+
+    if not usep_rows or not gas_rows:
+        return {"by_lag": [], "rolling": pd.DataFrame()}
+
+    usep_df = pd.DataFrame(usep_rows, columns=["date", "avg_usep"])
+    gas_df  = pd.DataFrame(gas_rows,  columns=["date", "jkm"])
+    usep_df["date"] = pd.to_datetime(usep_df["date"])
+    gas_df["date"]  = pd.to_datetime(gas_df["date"])
+
+    # Rolling 30-day Pearson on lag=0
+    merged0 = usep_df.merge(gas_df, on="date", how="inner").sort_values("date")
+    rolling_corr = (
+        merged0.set_index("date")[["avg_usep", "jkm"]]
+        .rolling(30)
+        .corr()
+        .unstack()
+        .dropna()
+    )
+    try:
+        roll_series = rolling_corr[("avg_usep", "jkm")].reset_index()
+        roll_series.columns = ["date", "corr_30d"]
+    except Exception:
+        roll_series = pd.DataFrame(columns=["date", "corr_30d"])
+
+    by_lag = []
+    for lag in lag_days:
+        gas_lagged = gas_df.copy()
+        gas_lagged["date"] = gas_lagged["date"] + pd.Timedelta(days=lag)
+        merged = usep_df.merge(gas_lagged, on="date", how="inner")
+        if len(merged) < 10:
+            continue
+        x = merged["jkm"].to_numpy(dtype=float)
+        y = merged["avg_usep"].to_numpy(dtype=float)
+        p_r, _ = stats.pearsonr(x, y)
+        s_r, _ = stats.spearmanr(x, y)
+        r2     = float(p_r ** 2)
+        by_lag.append({
+            "lag_days":    lag,
+            "pearson_r":   round(float(p_r), 4),
+            "spearman_rho": round(float(s_r), 4),
+            "r2":          round(r2, 4),
+            "n_obs":       len(merged),
+        })
+
+    return {"by_lag": by_lag, "rolling": roll_series}
+
+
+# ---------------------------------------------------------------------------
+# 9. Analyst forecast vs actuals  (Phase 4)
+# ---------------------------------------------------------------------------
+
+def analyst_vs_actuals(
+    engine,
+    source_ids: list[int] | None = None,
+    date_from=None,
+    date_to=None,
+) -> pd.DataFrame:
+    """
+    Compare each analyst forecast source vs actual USEP.
+    Returns DataFrame: source_name, vintage_year, n_overlap,
+                       mae, rmse, bias, pearson_r
+    """
+    where_clauses = ["fd.price IS NOT NULL", "np.usep IS NOT NULL"]
+    params: dict = {}
+    if source_ids:
+        ids_str = ",".join(str(i) for i in source_ids)
+        where_clauses.append(f"fd.source_id IN ({ids_str})")
+    if date_from:
+        where_clauses.append("fd.date >= :dfrom")
+        params["dfrom"] = str(date_from)
+    if date_to:
+        where_clauses.append("fd.date <= :dto")
+        params["dto"] = str(date_to)
+
+    where = " AND ".join(where_clauses)
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT
+                fs.source_name,
+                fs.vintage_year,
+                fs.granularity,
+                fd.date,
+                fd.period,
+                fd.price AS forecast_usep,
+                AVG(np.usep) AS actual_usep
+            FROM forecast_data fd
+            JOIN forecast_sources fs ON fs.id = fd.source_id
+            JOIN nems_prices np ON np.date = fd.date
+                AND (fd.period IS NULL OR np.period = fd.period)
+            WHERE {where}
+            GROUP BY fs.source_name, fs.vintage_year, fd.date, fd.period
+            ORDER BY fs.source_name, fs.vintage_year, fd.date
+        """), params).fetchall()
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows, columns=[
+        "source_name", "vintage_year", "granularity",
+        "date", "period", "forecast_usep", "actual_usep",
+    ])
+    df["error"] = df["actual_usep"] - df["forecast_usep"]
+
+    results = []
+    for (src, vint), grp in df.groupby(["source_name", "vintage_year"], dropna=False):
+        grp = grp.dropna(subset=["forecast_usep", "actual_usep"])
+        if len(grp) < 2:
+            continue
+        rmse = float(np.sqrt(np.mean(grp["error"] ** 2)))
+        mae  = float(np.mean(np.abs(grp["error"])))
+        bias = float(grp["error"].mean())
+        try:
+            p_r, _ = stats.pearsonr(
+                grp["forecast_usep"].to_numpy(dtype=float),
+                grp["actual_usep"].to_numpy(dtype=float),
+            )
+        except Exception:
+            p_r = float("nan")
+        results.append({
+            "source_name":  src,
+            "vintage_year": vint,
+            "n_overlap":    len(grp),
+            "mae":          round(mae, 2),
+            "rmse":         round(rmse, 2),
+            "bias":         round(bias, 2),
+            "pearson_r":    round(float(p_r), 4),
+        })
+    return pd.DataFrame(results)
+
+
+def vintage_comparison(engine, source_name: str) -> pd.DataFrame:
+    """
+    Show how one analyst's forecasts evolved across vintages vs actuals.
+    Returns: date, actual_avg_usep, forecast_2023, forecast_2024, ...
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT
+                fs.vintage_year,
+                fd.date,
+                AVG(fd.price) AS forecast_usep,
+                AVG(np.usep)  AS actual_usep
+            FROM forecast_data fd
+            JOIN forecast_sources fs ON fs.id = fd.source_id
+            JOIN nems_prices np ON np.date = fd.date
+                AND (fd.period IS NULL OR np.period = fd.period)
+            WHERE fs.source_name = :src
+            GROUP BY fs.vintage_year, fd.date
+            ORDER BY fd.date, fs.vintage_year
+        """), {"src": source_name}).fetchall()
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows, columns=["vintage_year", "date", "forecast_usep", "actual_usep"])
+    df["date"] = pd.to_datetime(df["date"])
+
+    pivot = df.pivot_table(
+        index="date", columns="vintage_year", values="forecast_usep"
+    ).reset_index()
+    pivot.columns = ["date"] + [f"forecast_{int(c)}" for c in pivot.columns[1:]]
+
+    actual = df.groupby("date")["actual_usep"].mean().reset_index()
+    return pivot.merge(actual, on="date", how="left")
+
+
+# ---------------------------------------------------------------------------
+# 10. Day-type USEP profile  (Phase 4)
+# ---------------------------------------------------------------------------
+
+def day_type_usep_profile(engine, date_from=None, date_to=None) -> pd.DataFrame:
+    """
+    Average USEP by (period × day_type) across 5 day types.
+    Returns heatmap-ready DataFrame: 48 periods × 5 day types.
+    Columns: period, weekday_core, weekday_wfh, saturday, sunday, public_holiday
+    """
+    from modules.utils import get_sg_calendar_features
+
+    where = "usep IS NOT NULL"
+    params: dict = {}
+    if date_from:
+        where += " AND date >= :dfrom"
+        params["dfrom"] = str(date_from)
+    if date_to:
+        where += " AND date <= :dto"
+        params["dto"] = str(date_to)
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT date, period, usep FROM nems_prices
+            WHERE {where} ORDER BY date, period
+        """), params).fetchall()
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows, columns=["date", "period", "usep"])
+    df["date"] = pd.to_datetime(df["date"])
+
+    cal = get_sg_calendar_features(df["date"])
+    df["day_type"] = cal["day_type"].values
+
+    pivot = (
+        df.groupby(["period", "day_type"])["usep"]
+        .mean()
+        .reset_index()
+        .pivot(index="period", columns="day_type", values="usep")
+        .reset_index()
+    )
+    pivot.columns.name = None
+    return pivot

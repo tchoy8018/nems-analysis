@@ -431,3 +431,174 @@ def backtest_walk_forward(df: pd.DataFrame, test_days: int = 90) -> pd.DataFrame
             })
 
     return pd.DataFrame(results)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 4 additions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def check_model_drift(engine, model_name: str = "xgboost_v1", window_days: int = 30) -> dict:
+    """
+    Compare recent rolling RMSE vs baseline RMSE stored in model_registry.
+    Returns {drift_detected, recent_rmse, baseline_rmse, ratio, n_obs}
+    Drift threshold: recent_rmse > 1.5 × baseline_rmse
+    """
+    with engine.connect() as conn:
+        reg_row = conn.execute(text("""
+            SELECT rmse FROM model_registry
+            WHERE model_name = :name AND is_active = 1
+            ORDER BY trained_at DESC LIMIT 1
+        """), {"name": model_name}).fetchone()
+
+        recent_rows = conn.execute(text("""
+            SELECT abs_error FROM forecast_actuals
+            WHERE model_name = :name
+              AND forecast_date >= DATE('now', :window)
+              AND actual_usep IS NOT NULL
+        """), {"name": model_name, "window": f"-{window_days} days"}).fetchall()
+
+    if not reg_row or not recent_rows:
+        return {"drift_detected": False, "recent_rmse": None,
+                "baseline_rmse": None, "ratio": None, "n_obs": 0}
+
+    baseline_rmse = float(reg_row[0])
+    errors = [float(r[0]) for r in recent_rows if r[0] is not None]
+    recent_rmse = float(np.sqrt(np.mean(np.array(errors) ** 2))) if errors else None
+    ratio = (recent_rmse / baseline_rmse) if (recent_rmse and baseline_rmse) else None
+
+    return {
+        "drift_detected": bool(ratio and ratio > 1.5),
+        "recent_rmse":    round(recent_rmse, 2) if recent_rmse else None,
+        "baseline_rmse":  round(baseline_rmse, 2),
+        "ratio":          round(ratio, 3) if ratio else None,
+        "n_obs":          len(errors),
+    }
+
+
+def save_predictions_to_db(
+    predictions_df: pd.DataFrame,
+    model_name: str,
+    horizon: int,
+    engine,
+) -> int:
+    """
+    Upsert model predictions into forecast_actuals table.
+    predictions_df must have: forecast_date, period, predicted_usep
+    Returns number of rows inserted/updated.
+    """
+    if predictions_df.empty:
+        return 0
+
+    now_str = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    dialect = engine.dialect.name
+    inserted = 0
+
+    with engine.begin() as conn:
+        for _, row in predictions_df.iterrows():
+            try:
+                actual = row.get("actual_usep")
+                error  = (float(actual) - float(row["predicted_usep"])) if pd.notna(actual) else None
+                abs_err = abs(error) if error is not None else None
+
+                if dialect == "sqlite":
+                    sql = text("""
+                        INSERT OR REPLACE INTO forecast_actuals
+                        (model_name, forecast_date, period, predicted_usep, actual_usep,
+                         error, abs_error, forecast_horizon_periods, created_at)
+                        VALUES
+                        (:model_name, :forecast_date, :period, :predicted_usep, :actual_usep,
+                         :error, :abs_error, :horizon, :now)
+                    """)
+                else:
+                    sql = text("""
+                        INSERT INTO forecast_actuals
+                        (model_name, forecast_date, period, predicted_usep, actual_usep,
+                         error, abs_error, forecast_horizon_periods, created_at)
+                        VALUES
+                        (:model_name, :forecast_date, :period, :predicted_usep, :actual_usep,
+                         :error, :abs_error, :horizon, :now)
+                        ON CONFLICT (model_name, forecast_date, period, forecast_horizon_periods)
+                        DO UPDATE SET
+                            actual_usep = EXCLUDED.actual_usep,
+                            error = EXCLUDED.error,
+                            abs_error = EXCLUDED.abs_error
+                    """)
+                conn.execute(sql, {
+                    "model_name":    model_name,
+                    "forecast_date": str(row["forecast_date"]),
+                    "period":        int(row["period"]),
+                    "predicted_usep": float(row["predicted_usep"]),
+                    "actual_usep":   float(actual) if pd.notna(actual) else None,
+                    "error":         error,
+                    "abs_error":     abs_err,
+                    "horizon":       horizon,
+                    "now":           now_str,
+                })
+                inserted += 1
+            except Exception:
+                pass
+
+    return inserted
+
+
+def forecast_monthly_scenarios(engine, target_months: int = 3) -> pd.DataFrame:
+    """
+    Generate monthly P10/P50/P90 USEP scenarios using seasonal pattern + gas regime.
+    Returns DataFrame: month_label, p10, p50, p90, gas_regime
+    """
+    with engine.connect() as conn:
+        hist = conn.execute(text("""
+            SELECT strftime('%m', date) AS month, usep
+            FROM nems_prices
+            WHERE usep IS NOT NULL
+        """)).fetchall()
+
+        gas_latest = conn.execute(text("""
+            SELECT AVG(jkm_usd_mmbtu) AS avg_jkm
+            FROM gas_prices
+            WHERE price_date >= DATE('now', '-90 days')
+              AND jkm_usd_mmbtu IS NOT NULL
+        """)).fetchone()
+
+    if not hist:
+        return pd.DataFrame()
+
+    hist_df = pd.DataFrame(hist, columns=["month", "usep"])
+    hist_df["usep"] = pd.to_numeric(hist_df["usep"], errors="coerce")
+    hist_df["month"] = hist_df["month"].astype(int)
+
+    seasonal = (
+        hist_df.groupby("month")["usep"]
+        .quantile([0.1, 0.5, 0.9])
+        .unstack()
+        .rename(columns={0.1: "p10", 0.5: "p50", 0.9: "p90"})
+    )
+
+    avg_jkm = float(gas_latest[0]) if (gas_latest and gas_latest[0]) else None
+    if avg_jkm and avg_jkm > 20:
+        gas_regime = "high"
+        mult = 1.15
+    elif avg_jkm and avg_jkm < 10:
+        gas_regime = "low"
+        mult = 0.90
+    else:
+        gas_regime = "neutral"
+        mult = 1.0
+
+    from datetime import date
+    today = date.today()
+    rows = []
+    for i in range(1, target_months + 1):
+        mo = ((today.month - 1 + i) % 12) + 1
+        yr = today.year + ((today.month - 1 + i) // 12)
+        label = f"{yr}-{mo:02d}"
+        if mo in seasonal.index:
+            rows.append({
+                "month_label": label,
+                "p10":         round(float(seasonal.loc[mo, "p10"]) * mult, 2),
+                "p50":         round(float(seasonal.loc[mo, "p50"]) * mult, 2),
+                "p90":         round(float(seasonal.loc[mo, "p90"]) * mult, 2),
+                "gas_regime":  gas_regime,
+            })
+
+    return pd.DataFrame(rows)
