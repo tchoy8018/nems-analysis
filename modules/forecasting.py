@@ -21,29 +21,58 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 SG_HOLIDAYS = holidays.country_holidays("SG")
 
-FEATURE_COLS = [
+FEATURE_COLS_BASE = [
     "period", "hour", "day_of_week", "month", "is_weekend", "is_public_holiday_sg",
     "period_sin", "period_cos", "month_sin", "month_cos",
     "usep_lag_48", "usep_lag_336", "usep_lag_672",
     "usep_rolling_mean_48", "usep_rolling_std_48",
     "demand_lag_48", "solar_lag_48",
 ]
+GAS_FEATURE_COLS = [
+    "gas_price_monthly", "gas_price_lag1m", "gas_price_lag2m",
+    "implied_usep_floor", "lng_share",
+]
+FEATURE_COLS = FEATURE_COLS_BASE  # updated in build_features if gas data available
 TARGET = "usep"
+
+
+def _load_gas_monthly(engine) -> pd.DataFrame:
+    """Load monthly gas price data for feature joining. Returns empty df if unavailable."""
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT price_date, weighted_avg_sgd_mmbtu,
+                       implied_usep_floor_sgd_mwh, lng_share_pct
+                FROM gas_prices
+                WHERE weighted_avg_sgd_mmbtu IS NOT NULL
+                ORDER BY price_date
+            """)).fetchall()
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows, columns=["date", "gas_sgd", "implied_floor", "lng_share"])
+        df["date"] = pd.to_datetime(df["date"])
+        df["ym"]   = df["date"].dt.strftime("%Y-%m")
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Feature engineering
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
+def build_features(df: pd.DataFrame, engine=None) -> pd.DataFrame:
     """
     Add time + lag features to a NEMS DataFrame.
 
     Input columns expected: date (date/datetime), period (1-48),
     usep, demand_mw, solar_mw.
 
+    If engine is provided and gas_prices table has data, gas features are added.
     Returns a copy with NaN rows (from lags) dropped.
     """
+    global FEATURE_COLS
+
     d = df.copy()
     d["date"] = pd.to_datetime(d["date"])
     d = d.sort_values(["date", "period"]).reset_index(drop=True)
@@ -82,8 +111,41 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     required_lags = ["usep_lag_48", "usep_lag_336", "usep_rolling_mean_48"]
     d = d.dropna(subset=required_lags + [TARGET]).reset_index(drop=True)
 
+    # ── Gas features (optional) ──
+    active_features = list(FEATURE_COLS_BASE)
+    gas_df = _load_gas_monthly(engine) if engine is not None else pd.DataFrame()
+    if not gas_df.empty:
+        d["ym"] = d["date"].dt.strftime("%Y-%m")
+
+        # lag-0: same month gas price
+        gas_l0 = gas_df[["ym", "gas_sgd", "implied_floor", "lng_share"]].rename(
+            columns={"gas_sgd": "gas_price_monthly", "lng_share": "lng_share"})
+        d = d.merge(gas_l0, on="ym", how="left")
+
+        # lag-1m
+        gas_df["ym_lag1"] = (gas_df["date"] + pd.DateOffset(months=1)).dt.strftime("%Y-%m")
+        gas_l1 = gas_df[["ym_lag1", "gas_sgd"]].rename(
+            columns={"ym_lag1": "ym", "gas_sgd": "gas_price_lag1m"})
+        d = d.merge(gas_l1, on="ym", how="left")
+
+        # lag-2m
+        gas_df["ym_lag2"] = (gas_df["date"] + pd.DateOffset(months=2)).dt.strftime("%Y-%m")
+        gas_l2 = gas_df[["ym_lag2", "gas_sgd"]].rename(
+            columns={"ym_lag2": "ym", "gas_sgd": "gas_price_lag2m"})
+        d = d.merge(gas_l2, on="ym", how="left")
+
+        d["implied_usep_floor"] = d.get("implied_floor", np.nan)
+
+        for gcol in GAS_FEATURE_COLS:
+            if gcol in d.columns:
+                d[gcol] = d[gcol].fillna(d[gcol].median())
+                if gcol not in active_features:
+                    active_features.append(gcol)
+
+        FEATURE_COLS = active_features
+
     # Fill remaining sparse NaNs with column median
-    for col in FEATURE_COLS:
+    for col in active_features:
         if col in d.columns and d[col].isna().any():
             d[col] = d[col].fillna(d[col].median())
 
@@ -129,7 +191,7 @@ def train_xgboost(df: pd.DataFrame, engine) -> dict:
     """Train XGBoost on 80% chronological split; save + register model."""
     from xgboost import XGBRegressor
 
-    feat_df = build_features(df)
+    feat_df = build_features(df, engine=engine)
     split   = int(len(feat_df) * 0.8)
     train   = feat_df.iloc[:split]
     test    = feat_df.iloc[split:]

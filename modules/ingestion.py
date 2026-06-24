@@ -237,92 +237,245 @@ def detect_file_type(df: pd.DataFrame) -> str:
     return "unknown"
 
 
-def ingest_gas_prices(file_path, engine) -> dict:
+def _parse_spglobal_gas_sheet(ws) -> dict:
     """
-    Import gas price data (JKM + optional piped gas) from CSV or Excel.
+    Parse one sheet from the S&P Global Singapore Gas Trade Data workbook.
+    Returns: {(year, month): {vol_mt, val_usd, price_usd_mmbtu}}
+    Row layout (1-indexed): 5=years, 7-18=vol, 20-31=val, 33-44=price
+    """
+    rows = list(ws.iter_rows(min_row=1, max_row=44, values_only=True))
 
-    Expected columns (flexible):
-        date / price_date  — date
-        jkm / jkm_usd_mmbtu
-        piped_gas / piped_gas_sgd_mmbtu  (optional)
-        source  (optional)
+    # Year headers: row 5 (index 4), starting col C (index 2)
+    year_row = rows[4]
+    year_cols: list[tuple[int, int]] = []   # (col_index, year)
+    for ci, val in enumerate(year_row):
+        if ci < 2 or val is None:
+            continue
+        try:
+            yr = int(str(val).strip())
+            year_cols.append((ci, yr))
+        except ValueError:
+            pass
+
+    # Block offsets (0-indexed first data row): vol=6, val=19, price=32
+    MONTHS = ["January","February","March","April","May","June",
+              "July","August","September","October","November","December"]
+    MONTH_NUM = {m: i+1 for i, m in enumerate(MONTHS)}
+
+    data: dict[tuple[int,int], dict] = {}
+
+    for block_start, block_key in [(6, "vol"), (19, "val"), (32, "price")]:
+        for month_offset in range(12):
+            row = rows[block_start + month_offset]
+            month_label = row[1]
+            if month_label not in MONTH_NUM:
+                continue
+            month = MONTH_NUM[month_label]
+            for ci, year in year_cols:
+                val = row[ci] if ci < len(row) else None
+                if val is None:
+                    continue
+                try:
+                    val = float(val)
+                except (TypeError, ValueError):
+                    continue
+                key = (year, month)
+                if key not in data:
+                    data[key] = {}
+                data[key][block_key] = val
+
+    return data
+
+
+def ingest_gas_prices(excel_path, engine, fx_usd_sgd: float = 1.35) -> dict:
     """
-    file_path = Path(file_path)
-    if not file_path.exists():
-        return {"rows_imported": 0, "rows_skipped": 0, "errors": [f"File not found: {file_path}"]}
+    Parse Singapore Gas Trade Data workbook (S&P Global / SG Customs).
+    Reads Malaysia piped, Indonesia piped, and LNG import sheets.
+    Computes weighted average price and implied CCGT cost floor.
+
+    Conversion factors: LNG 1 MT = 52 MMBtu; piped gas 1 MT = 50 MMBtu
+    Heat rate: 7.5 MMBtu/MWh (standard Singapore CCGT)
+    """
+    excel_path = Path(excel_path)
+    if not excel_path.exists():
+        return {"rows_ingested": 0, "errors": [f"File not found: {excel_path}"]}
 
     try:
-        if file_path.suffix.lower() in (".xlsx", ".xls"):
-            raw = pd.read_excel(file_path, engine="openpyxl")
-        else:
-            raw = pd.read_csv(file_path)
+        import openpyxl
+        wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
     except Exception as e:
-        return {"rows_imported": 0, "rows_skipped": 0, "errors": [str(e)]}
+        return {"rows_ingested": 0, "errors": [str(e)]}
 
-    col_map = {}
-    for c in raw.columns:
-        lc = c.lower().strip()
-        if lc in ("date", "price_date"):
-            col_map[c] = "price_date"
-        elif lc in ("jkm", "jkm_usd_mmbtu"):
-            col_map[c] = "jkm_usd_mmbtu"
-        elif lc in ("piped_gas", "piped_gas_sgd_mmbtu"):
-            col_map[c] = "piped_gas_sgd_mmbtu"
-        elif lc == "source":
-            col_map[c] = "source"
-    df = raw.rename(columns=col_map)
+    SHEET_MAP = {
+        "malaysia":  "Piped gas import from Malaysia",
+        "indonesia": "Piped gas import from Indonesia",
+        "lng":       "LNG imports",
+    }
+    MMBTU_PER_MT = {"malaysia": 50.0, "indonesia": 50.0, "lng": 52.0}
 
-    if "price_date" not in df.columns:
-        return {"rows_imported": 0, "rows_skipped": 0, "errors": ["No date column found"]}
+    parsed: dict[str, dict] = {}
+    for src, sheet_name in SHEET_MAP.items():
+        if sheet_name not in wb.sheetnames:
+            parsed[src] = {}
+            continue
+        parsed[src] = _parse_spglobal_gas_sheet(wb[sheet_name])
 
-    df["price_date"] = pd.to_datetime(df["price_date"], errors="coerce").dt.date
-    df = df.dropna(subset=["price_date"])
-    if "jkm_usd_mmbtu" in df.columns:
-        df["jkm_usd_mmbtu"] = pd.to_numeric(df["jkm_usd_mmbtu"], errors="coerce")
-    else:
-        df["jkm_usd_mmbtu"] = float("nan")
-    if "piped_gas_sgd_mmbtu" not in df.columns:
-        df["piped_gas_sgd_mmbtu"] = float("nan")
-    if "source" not in df.columns:
-        df["source"] = file_path.stem
-    df["imported_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    # Merge into monthly records
+    all_keys: set[tuple[int,int]] = set()
+    for src_data in parsed.values():
+        all_keys.update(src_data.keys())
 
+    now_str = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
     dialect = _detect_dialect(engine)
     inserted = 0
     skipped = 0
-    errors = []
+    errors: list[str] = []
+    all_dates = []
 
     with engine.begin() as conn:
-        for _, row in df.iterrows():
+        for year, month in sorted(all_keys):
             try:
+                price_date = f"{year:04d}-{month:02d}-01"
+
+                my = parsed["malaysia"].get((year, month), {})
+                id_ = parsed["indonesia"].get((year, month), {})
+                lg  = parsed["lng"].get((year, month), {})
+
+                # MMBtu volumes for weighted avg
+                my_mmbtu  = (my.get("vol", 0) or 0) * MMBTU_PER_MT["malaysia"]
+                id_mmbtu  = (id_.get("vol", 0) or 0) * MMBTU_PER_MT["indonesia"]
+                lng_mmbtu = (lg.get("vol", 0) or 0)  * MMBTU_PER_MT["lng"]
+                total_mmbtu = my_mmbtu + id_mmbtu + lng_mmbtu
+                total_vol_mt = (
+                    (my.get("vol") or 0) +
+                    (id_.get("vol") or 0) +
+                    (lg.get("vol") or 0)
+                )
+
+                # Weighted average price
+                if total_mmbtu > 0:
+                    w_num = (
+                        my_mmbtu  * (my.get("price") or 0) +
+                        id_mmbtu  * (id_.get("price") or 0) +
+                        lng_mmbtu * (lg.get("price") or 0)
+                    )
+                    weighted_usd = w_num / total_mmbtu
+                    my_share  = 100.0 * my_mmbtu  / total_mmbtu if my_mmbtu  else 0.0
+                    id_share  = 100.0 * id_mmbtu  / total_mmbtu if id_mmbtu  else 0.0
+                    lng_share = 100.0 * lng_mmbtu / total_mmbtu if lng_mmbtu else 0.0
+                else:
+                    weighted_usd = None
+                    my_share = id_share = lng_share = None
+
+                weighted_sgd = (weighted_usd * fx_usd_sgd) if weighted_usd else None
+                implied_floor = (weighted_sgd * 7.5) if weighted_sgd else None
+
+                params = {
+                    "price_date":               price_date,
+                    "malaysia_vol_mt":           my.get("vol"),
+                    "indonesia_vol_mt":          id_.get("vol"),
+                    "lng_vol_mt":                lg.get("vol"),
+                    "total_vol_mt":              total_vol_mt or None,
+                    "malaysia_val_usd":          my.get("val"),
+                    "indonesia_val_usd":         id_.get("val"),
+                    "lng_val_usd":               lg.get("val"),
+                    "malaysia_price_usd_mmbtu":  my.get("price"),
+                    "indonesia_price_usd_mmbtu": id_.get("price"),
+                    "lng_price_usd_mmbtu":       lg.get("price"),
+                    "weighted_avg_usd_mmbtu":    round(weighted_usd, 4) if weighted_usd else None,
+                    "malaysia_share_pct":        round(my_share, 2)  if my_share  is not None else None,
+                    "indonesia_share_pct":       round(id_share, 2)  if id_share  is not None else None,
+                    "lng_share_pct":             round(lng_share, 2) if lng_share is not None else None,
+                    "fx_rate_usd_sgd":           fx_usd_sgd,
+                    "weighted_avg_sgd_mmbtu":    round(weighted_sgd, 4) if weighted_sgd else None,
+                    "implied_usep_floor_sgd_mwh": round(implied_floor, 2) if implied_floor else None,
+                    "source":                    "SG Customs / S&P Global",
+                    "imported_at":               now_str,
+                }
+
                 if dialect == "sqlite":
                     sql = text("""
-                        INSERT OR IGNORE INTO gas_prices
-                        (price_date, jkm_usd_mmbtu, piped_gas_sgd_mmbtu, source, imported_at)
-                        VALUES (:price_date, :jkm_usd_mmbtu, :piped_gas_sgd_mmbtu, :source, :imported_at)
+                        INSERT OR REPLACE INTO gas_prices (
+                            price_date,
+                            malaysia_vol_mt, indonesia_vol_mt, lng_vol_mt, total_vol_mt,
+                            malaysia_val_usd, indonesia_val_usd, lng_val_usd,
+                            malaysia_price_usd_mmbtu, indonesia_price_usd_mmbtu, lng_price_usd_mmbtu,
+                            weighted_avg_usd_mmbtu,
+                            malaysia_share_pct, indonesia_share_pct, lng_share_pct,
+                            fx_rate_usd_sgd, weighted_avg_sgd_mmbtu, implied_usep_floor_sgd_mwh,
+                            source, imported_at
+                        ) VALUES (
+                            :price_date,
+                            :malaysia_vol_mt, :indonesia_vol_mt, :lng_vol_mt, :total_vol_mt,
+                            :malaysia_val_usd, :indonesia_val_usd, :lng_val_usd,
+                            :malaysia_price_usd_mmbtu, :indonesia_price_usd_mmbtu, :lng_price_usd_mmbtu,
+                            :weighted_avg_usd_mmbtu,
+                            :malaysia_share_pct, :indonesia_share_pct, :lng_share_pct,
+                            :fx_rate_usd_sgd, :weighted_avg_sgd_mmbtu, :implied_usep_floor_sgd_mwh,
+                            :source, :imported_at
+                        )
                     """)
                 else:
                     sql = text("""
-                        INSERT INTO gas_prices
-                        (price_date, jkm_usd_mmbtu, piped_gas_sgd_mmbtu, source, imported_at)
-                        VALUES (:price_date, :jkm_usd_mmbtu, :piped_gas_sgd_mmbtu, :source, :imported_at)
-                        ON CONFLICT (price_date) DO NOTHING
+                        INSERT INTO gas_prices (
+                            price_date,
+                            malaysia_vol_mt, indonesia_vol_mt, lng_vol_mt, total_vol_mt,
+                            malaysia_val_usd, indonesia_val_usd, lng_val_usd,
+                            malaysia_price_usd_mmbtu, indonesia_price_usd_mmbtu, lng_price_usd_mmbtu,
+                            weighted_avg_usd_mmbtu,
+                            malaysia_share_pct, indonesia_share_pct, lng_share_pct,
+                            fx_rate_usd_sgd, weighted_avg_sgd_mmbtu, implied_usep_floor_sgd_mwh,
+                            source, imported_at
+                        ) VALUES (
+                            :price_date,
+                            :malaysia_vol_mt, :indonesia_vol_mt, :lng_vol_mt, :total_vol_mt,
+                            :malaysia_val_usd, :indonesia_val_usd, :lng_val_usd,
+                            :malaysia_price_usd_mmbtu, :indonesia_price_usd_mmbtu, :lng_price_usd_mmbtu,
+                            :weighted_avg_usd_mmbtu,
+                            :malaysia_share_pct, :indonesia_share_pct, :lng_share_pct,
+                            :fx_rate_usd_sgd, :weighted_avg_sgd_mmbtu, :implied_usep_floor_sgd_mwh,
+                            :source, :imported_at
+                        )
+                        ON CONFLICT (price_date) DO UPDATE SET
+                            weighted_avg_usd_mmbtu    = EXCLUDED.weighted_avg_usd_mmbtu,
+                            lng_price_usd_mmbtu       = EXCLUDED.lng_price_usd_mmbtu,
+                            implied_usep_floor_sgd_mwh = EXCLUDED.implied_usep_floor_sgd_mwh,
+                            imported_at               = EXCLUDED.imported_at
                     """)
-                result = conn.execute(sql, {
-                    "price_date": str(row["price_date"]),
-                    "jkm_usd_mmbtu": None if pd.isna(row["jkm_usd_mmbtu"]) else float(row["jkm_usd_mmbtu"]),
-                    "piped_gas_sgd_mmbtu": None if pd.isna(row["piped_gas_sgd_mmbtu"]) else float(row["piped_gas_sgd_mmbtu"]),
-                    "source": row["source"],
-                    "imported_at": row["imported_at"],
-                })
-                if result.rowcount == 1:
-                    inserted += 1
-                else:
-                    skipped += 1
-            except Exception as e:
-                errors.append(str(e))
 
-    return {"rows_imported": inserted, "rows_skipped": skipped, "errors": errors}
+                conn.execute(sql, params)
+                inserted += 1
+                all_dates.append(price_date)
+            except Exception as e:
+                skipped += 1
+                if len(errors) < 5:
+                    errors.append(f"{year}-{month:02d}: {e}")
+
+    # Summary
+    date_range = (min(all_dates), max(all_dates)) if all_dates else (None, None)
+    latest_row = None
+    try:
+        with engine.connect() as conn:
+            r = conn.execute(text("""
+                SELECT weighted_avg_usd_mmbtu, lng_share_pct, implied_usep_floor_sgd_mwh
+                FROM gas_prices
+                WHERE weighted_avg_usd_mmbtu IS NOT NULL
+                ORDER BY price_date DESC LIMIT 1
+            """)).fetchone()
+            if r:
+                latest_row = r
+    except Exception:
+        pass
+
+    return {
+        "rows_ingested":          inserted,
+        "rows_skipped":           skipped,
+        "date_range":             date_range,
+        "latest_weighted_price":  round(latest_row[0], 2) if latest_row else None,
+        "latest_lng_share_pct":   round(latest_row[1], 1) if latest_row else None,
+        "latest_implied_usep":    round(latest_row[2], 1) if latest_row else None,
+        "errors":                 errors,
+    }
 
 
 def ingest_analyst_forecast(

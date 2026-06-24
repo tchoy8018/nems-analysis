@@ -280,82 +280,158 @@ def yoy_monthly_comparison(engine, month: int) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# 8. Gas price ↔ USEP correlation  (Phase 4)
+# 8. Gas price ↔ USEP correlation  (Phase 4 — uses real customs data)
 # ---------------------------------------------------------------------------
 
-def gas_usep_correlation(engine, lag_days: list[int] | None = None) -> dict:
+def gas_usep_correlation(engine) -> dict:
     """
-    Compute Pearson r, Spearman rho, and R² between gas JKM price and
-    daily-average USEP at multiple lags.
+    Join gas_prices (monthly, from SG Customs) with monthly avg USEP.
+    Computes Pearson r, Spearman rho, R² at lags 0–3 months.
+    Also computes pass-through regression slope and rolling 12-month Pearson r.
 
     Returns {
-        "by_lag":   list of {lag, pearson_r, spearman_rho, r2, n_obs},
-        "rolling":  DataFrame with date, corr_30d (rolling 30-day Pearson on lag=0)
+        lags: [{lag_months, pearson_r, spearman_rho, r2, n_obs}],
+        best_lag: int,
+        pass_through_slope: float,   # delta USEP per delta gas (SGD/MMBtu)
+        regression_r2: float,
+        regime_note: str,
+        monthly_df: DataFrame with date, avg_usep, weighted_gas_usd, weighted_gas_sgd,
+                    implied_floor, rolling_12m_pearson
     }
     """
-    if lag_days is None:
-        lag_days = [0, 1, 3, 7, 14]
-
-    # Daily avg USEP
     with engine.connect() as conn:
         usep_rows = conn.execute(text("""
-            SELECT date, AVG(usep) AS avg_usep
+            SELECT strftime('%Y-%m', date) AS ym, AVG(usep) AS avg_usep
             FROM nems_prices
             WHERE usep IS NOT NULL
-            GROUP BY date
-            ORDER BY date
+            GROUP BY ym
+            ORDER BY ym
         """)).fetchall()
         gas_rows = conn.execute(text("""
-            SELECT price_date, jkm_usd_mmbtu
+            SELECT price_date,
+                   weighted_avg_usd_mmbtu,
+                   weighted_avg_sgd_mmbtu,
+                   implied_usep_floor_sgd_mwh,
+                   lng_share_pct
             FROM gas_prices
-            WHERE jkm_usd_mmbtu IS NOT NULL
+            WHERE weighted_avg_usd_mmbtu IS NOT NULL
             ORDER BY price_date
         """)).fetchall()
 
     if not usep_rows or not gas_rows:
-        return {"by_lag": [], "rolling": pd.DataFrame()}
+        return {"lags": [], "best_lag": 0, "pass_through_slope": None,
+                "regression_r2": None, "regime_note": "", "monthly_df": pd.DataFrame()}
 
-    usep_df = pd.DataFrame(usep_rows, columns=["date", "avg_usep"])
-    gas_df  = pd.DataFrame(gas_rows,  columns=["date", "jkm"])
-    usep_df["date"] = pd.to_datetime(usep_df["date"])
-    gas_df["date"]  = pd.to_datetime(gas_df["date"])
+    usep_df = pd.DataFrame(usep_rows, columns=["ym", "avg_usep"])
+    usep_df["date"] = pd.to_datetime(usep_df["ym"] + "-01")
 
-    # Rolling 30-day Pearson on lag=0
-    merged0 = usep_df.merge(gas_df, on="date", how="inner").sort_values("date")
-    rolling_corr = (
-        merged0.set_index("date")[["avg_usep", "jkm"]]
-        .rolling(30)
-        .corr()
-        .unstack()
-        .dropna()
-    )
+    gas_df = pd.DataFrame(gas_rows,
+        columns=["date", "weighted_usd", "weighted_sgd", "implied_floor", "lng_share"])
+    gas_df["date"] = pd.to_datetime(gas_df["date"])
+    gas_df["ym"]   = gas_df["date"].dt.strftime("%Y-%m")
+
+    merged = usep_df.merge(gas_df[["ym","weighted_usd","weighted_sgd","implied_floor","lng_share"]],
+                           on="ym", how="inner").sort_values("date")
+
+    # Rolling 12-month Pearson r
+    def _rolling_corr(df, x_col, y_col, window=12):
+        return df[x_col].rolling(window).corr(df[y_col])
+
+    merged["rolling_12m_pearson"] = _rolling_corr(merged, "weighted_usd", "avg_usep")
+
+    # Regime note: compare correlation pre/post-2022
+    pre  = merged[merged["date"] < "2022-01-01"]
+    post = merged[merged["date"] >= "2022-01-01"]
     try:
-        roll_series = rolling_corr[("avg_usep", "jkm")].reset_index()
-        roll_series.columns = ["date", "corr_30d"]
+        r_pre,  _ = stats.pearsonr(pre["weighted_usd"].to_numpy(dtype=float),
+                                   pre["avg_usep"].to_numpy(dtype=float))
+        r_post, _ = stats.pearsonr(post["weighted_usd"].to_numpy(dtype=float),
+                                   post["avg_usep"].to_numpy(dtype=float))
+        if abs(r_post) > abs(r_pre) + 0.1:
+            regime_note = f"Correlation stronger post-2022 (r={r_post:.2f} vs r={r_pre:.2f})"
+        else:
+            regime_note = f"Correlation stable across regimes (pre-2022: r={r_pre:.2f}, post-2022: r={r_post:.2f})"
     except Exception:
-        roll_series = pd.DataFrame(columns=["date", "corr_30d"])
+        regime_note = ""
 
-    by_lag = []
-    for lag in lag_days:
-        gas_lagged = gas_df.copy()
-        gas_lagged["date"] = gas_lagged["date"] + pd.Timedelta(days=lag)
-        merged = usep_df.merge(gas_lagged, on="date", how="inner")
-        if len(merged) < 10:
+    # Lag analysis (months)
+    lag_results = []
+    best_r2 = -1
+    best_lag = 0
+    for lag in range(4):
+        gas_lagged = gas_df[["ym", "weighted_usd"]].copy()
+        gas_lagged["date"] = gas_df["date"] + pd.DateOffset(months=lag)
+        gas_lagged["ym"] = gas_lagged["date"].dt.strftime("%Y-%m")
+        m = usep_df.merge(gas_lagged[["ym","weighted_usd"]], on="ym", how="inner")
+        if len(m) < 12:
             continue
-        x = merged["jkm"].to_numpy(dtype=float)
-        y = merged["avg_usep"].to_numpy(dtype=float)
-        p_r, _ = stats.pearsonr(x, y)
-        s_r, _ = stats.spearmanr(x, y)
-        r2     = float(p_r ** 2)
-        by_lag.append({
-            "lag_days":    lag,
-            "pearson_r":   round(float(p_r), 4),
+        x = m["weighted_usd"].to_numpy(dtype=float)
+        y = m["avg_usep"].to_numpy(dtype=float)
+        try:
+            p_r, _ = stats.pearsonr(x, y)
+            s_r, _ = stats.spearmanr(x, y)
+        except Exception:
+            continue
+        r2 = float(p_r ** 2)
+        lag_results.append({
+            "lag_months":   lag,
+            "pearson_r":    round(float(p_r), 4),
             "spearman_rho": round(float(s_r), 4),
-            "r2":          round(r2, 4),
-            "n_obs":       len(merged),
+            "r2":           round(r2, 4),
+            "n_obs":        len(m),
         })
+        if r2 > best_r2:
+            best_r2  = r2
+            best_lag = lag
 
-    return {"by_lag": by_lag, "rolling": roll_series}
+    # Pass-through regression at best lag
+    pass_through_slope = None
+    regression_r2      = None
+    try:
+        x = merged["weighted_sgd"].to_numpy(dtype=float)
+        y = merged["avg_usep"].to_numpy(dtype=float)
+        mask = np.isfinite(x) & np.isfinite(y)
+        if mask.sum() > 10:
+            coeffs = np.polyfit(x[mask], y[mask], 1)
+            pass_through_slope = round(float(coeffs[0]), 3)
+            p_r, _ = stats.pearsonr(x[mask], y[mask])
+            regression_r2 = round(float(p_r**2), 4)
+    except Exception:
+        pass
+
+    return {
+        "lags":                lag_results,
+        "best_lag":            best_lag,
+        "pass_through_slope":  pass_through_slope,
+        "regression_r2":       regression_r2,
+        "regime_note":         regime_note,
+        "monthly_df":          merged,
+    }
+
+
+def gas_mix_evolution(engine) -> pd.DataFrame:
+    """
+    Monthly source shares over time.
+    Returns: date, malaysia_share_pct, indonesia_share_pct, lng_share_pct,
+             weighted_avg_usd_mmbtu, implied_usep_floor_sgd_mwh
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT price_date,
+                   malaysia_share_pct, indonesia_share_pct, lng_share_pct,
+                   weighted_avg_usd_mmbtu, implied_usep_floor_sgd_mwh
+            FROM gas_prices
+            WHERE malaysia_share_pct IS NOT NULL
+            ORDER BY price_date
+        """)).fetchall()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows, columns=[
+        "date", "malaysia_share_pct", "indonesia_share_pct", "lng_share_pct",
+        "weighted_avg_usd_mmbtu", "implied_usep_floor_sgd_mwh",
+    ])
+    df["date"] = pd.to_datetime(df["date"])
+    return df
 
 
 # ---------------------------------------------------------------------------

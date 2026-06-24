@@ -18,14 +18,14 @@ from modules.ingestion import (
     ingest_and_retrain,
     ingest_gas_prices,
 )
-from modules.analysis import gas_usep_correlation, analyst_vs_actuals, vintage_comparison
+from modules.analysis import analyst_vs_actuals, vintage_comparison
 from modules.theme import apply_theme_css, get_chart_layout, get_rangeselector_style, render_theme_toggle
 
 st.set_page_config(page_title="Data Hub", layout="wide", page_icon="🗄️")
 
 if "theme" not in st.session_state:
     st.session_state["theme"] = "dark"
-apply_theme_css(st.session_state["theme"])
+apply_theme_css()
 
 render_theme_toggle()
 
@@ -244,10 +244,10 @@ base_rmse = _get_baseline_rmse(engine)
 if rmse_df.empty:
     st.info("No forecast–actual pairs yet. Run a forecast and save predictions to populate.")
 else:
-    cl = get_chart_layout(st.session_state["theme"])
+    cl = get_chart_layout()
     fig = go.Figure()
 
-    rs_style = get_rangeselector_style(st.session_state["theme"])
+    rs_style = get_rangeselector_style()
     for model, grp in rmse_df.groupby("model_name"):
         fig.add_trace(go.Scatter(
             x=grp["forecast_date"], y=grp["rmse"],
@@ -301,116 +301,260 @@ else:
 st.divider()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Section 4: Gas Price Analysis
+# Section 4: Gas & USEP Intelligence
 # ─────────────────────────────────────────────────────────────────────────────
-st.header("4 · Gas Price Analysis")
+st.header("4 · ⛽ Gas & USEP Intelligence")
+st.caption("Source: Singapore Customs / S&P Global Energy Gas Trade Data Tables, June 2026")
+
+from modules.analysis import gas_usep_correlation as _gas_usep_corr, gas_mix_evolution
 
 
 @st.cache_data(ttl=300)
-def _get_gas_series(_engine):
+def _get_gas_full(_engine):
     with _engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT price_date, jkm_usd_mmbtu, piped_gas_sgd_mmbtu
-            FROM gas_prices ORDER BY price_date
+            SELECT price_date,
+                   malaysia_price_usd_mmbtu, indonesia_price_usd_mmbtu, lng_price_usd_mmbtu,
+                   weighted_avg_usd_mmbtu, weighted_avg_sgd_mmbtu, implied_usep_floor_sgd_mwh,
+                   malaysia_share_pct, indonesia_share_pct, lng_share_pct
+            FROM gas_prices
+            WHERE weighted_avg_usd_mmbtu IS NOT NULL
+            ORDER BY price_date
         """)).fetchall()
-    return pd.DataFrame(rows, columns=["date", "jkm", "piped"])
+    return pd.DataFrame(rows, columns=[
+        "date", "my_price", "id_price", "lng_price",
+        "weighted_usd", "weighted_sgd", "implied_floor",
+        "my_share", "id_share", "lng_share",
+    ])
 
 
 @st.cache_data(ttl=300)
-def _get_daily_usep(_engine):
+def _get_monthly_usep(_engine):
     with _engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT date, AVG(usep) AS avg_usep FROM nems_prices
-            WHERE usep IS NOT NULL GROUP BY date ORDER BY date
+            SELECT strftime('%Y-%m', date) AS ym, AVG(usep) AS avg_usep
+            FROM nems_prices WHERE usep IS NOT NULL
+            GROUP BY ym ORDER BY ym
         """)).fetchall()
-    return pd.DataFrame(rows, columns=["date", "avg_usep"])
+    df = pd.DataFrame(rows, columns=["ym", "avg_usep"])
+    df["date"] = pd.to_datetime(df["ym"] + "-01")
+    return df
 
 
-gas_df  = _get_gas_series(engine)
-usep_df = _get_daily_usep(engine)
+@st.cache_data(ttl=600)
+def _get_gas_corr(_engine):
+    return _gas_usep_corr(_engine)
 
-if gas_df.empty:
-    st.info("No gas price data yet. Upload a gas price CSV/Excel above.")
+
+gas_full = _get_gas_full(engine)
+monthly_usep = _get_monthly_usep(engine)
+corr_result = _get_gas_corr(engine)
+
+if gas_full.empty:
+    st.info("No gas price data. Import the S&P Global workbook in Section 2.")
 else:
-    gas_df["date"]  = pd.to_datetime(gas_df["date"])
-    usep_df["date"] = pd.to_datetime(usep_df["date"])
-    merged = gas_df.merge(usep_df, on="date", how="inner")
+    gas_full["date"] = pd.to_datetime(gas_full["date"])
+    latest = gas_full.iloc[-1]
 
-    cl = get_chart_layout(st.session_state["theme"])
-    rs_style = get_rangeselector_style(st.session_state["theme"])
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=gas_df["date"], y=gas_df["jkm"],
-        name="JKM (USD/MMBtu)", yaxis="y1",
-        line=dict(color="#f0b429", width=2),
-    ))
-    if not merged.empty:
-        fig.add_trace(go.Scatter(
-            x=merged["date"], y=merged["avg_usep"],
-            name="Daily Avg USEP ($/MWh)", yaxis="y2",
-            line=dict(color="#009CEA", width=1.5, dash="dot"),
-        ))
-
-    fig.update_layout(**cl)
-    fig.update_layout(
-        title="JKM Gas Price vs Daily Average USEP",
-        xaxis=dict(
-            rangeselector=rs_style,
-            rangeslider=dict(visible=True, thickness=0.04),
-            type="date",
-        ),
-        yaxis=dict(title="JKM (USD/MMBtu)", side="left"),
-        yaxis2=dict(title="Avg USEP ($/MWh)", side="right", overlaying="y"),
-        legend=dict(x=0.01, y=0.99),
+    # KPI tiles
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(
+        "Latest Weighted Gas",
+        f"${latest['weighted_usd']:.2f}/MMBtu",
+        help=f"S${latest['weighted_sgd']:.2f}/MMBtu after FX conversion",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    k2.metric(
+        "LNG Share",
+        f"{latest['lng_share']:.0f}%",
+        help="LNG's share of total gas volume (MT basis)",
+    )
+    k3.metric(
+        "Implied CCGT Floor",
+        f"S${latest['implied_floor']:.0f}/MWh",
+        help="Weighted gas price × 7.5 MMBtu/MWh heat rate",
+    )
+    best_lag = corr_result.get("best_lag", 0)
+    best_r = next((l["pearson_r"] for l in corr_result.get("lags", [])
+                   if l["lag_months"] == best_lag), None)
+    r2_pct = f"{corr_result['regression_r2']*100:.0f}%" if corr_result.get("regression_r2") else "—"
+    k4.metric(
+        "Gas→USEP Correlation",
+        f"r = {best_r:.2f}" if best_r else "—",
+        help=f"Pearson r at lag {best_lag}m. R² = {r2_pct}",
+    )
 
-    # Lag correlation bar chart
-    with st.spinner("Computing lag correlations..."):
-        corr_result = gas_usep_correlation(engine, lag_days=[0, 1, 3, 7, 14, 30])
+    cl = get_chart_layout()
+    rs_style = get_rangeselector_style()
 
-    if corr_result["by_lag"]:
-        lag_df = pd.DataFrame(corr_result["by_lag"])
+    # ── Chart 1: Gas Price by Source ──────────────────────────────────────────
+    fig1 = go.Figure()
+    fig1.update_layout(**cl)
+
+    # Filter from 2019 for cleaner display
+    gf19 = gas_full[gas_full["date"] >= "2019-01-01"]
+
+    fig1.add_trace(go.Scatter(x=gf19["date"], y=gf19["my_price"],
+        name="Malaysia piped", line=dict(color="#009CEA", width=2)))
+    fig1.add_trace(go.Scatter(x=gf19["date"], y=gf19["id_price"],
+        name="Indonesia piped", line=dict(color="#f0b429", width=2)))
+    fig1.add_trace(go.Scatter(x=gf19["date"], y=gf19["lng_price"],
+        name="LNG", line=dict(color="#e74c3c", width=2)))
+
+    for ann_date, ann_text in [("2022-02-01", "2022 energy crisis"),
+                                ("2023-01-01", "Indonesia decline begins")]:
+        if pd.to_datetime(ann_date) >= gf19["date"].min():
+            fig1.add_vline(x=pd.to_datetime(ann_date).timestamp()*1000,
+                           line_dash="dot", line_color="#555", line_width=1,
+                           annotation_text=ann_text, annotation_font_size=10)
+
+    fig1.update_layout(
+        title="Gas Import Price by Source (USD/MMBtu)",
+        xaxis=dict(title="Month",
+                   rangeselector=rs_style,
+                   rangeslider=dict(visible=True, thickness=0.04),
+                   type="date"),
+        yaxis=dict(title="USD/MMBtu"),
+    )
+    st.plotly_chart(fig1, use_container_width=True)
+
+    # ── Chart 2: Weighted Gas vs Monthly USEP (dual axis) ────────────────────
+    monthly_merged = gas_full.merge(
+        monthly_usep[["date", "avg_usep"]], on="date", how="inner"
+    )
+
+    if not monthly_merged.empty:
+        r2_str = f"{corr_result['regression_r2']:.2f}" if corr_result.get("regression_r2") else "N/A"
         fig2 = go.Figure()
-        fig2.add_trace(go.Bar(
-            x=[f"Lag {r['lag_days']}d" for r in corr_result["by_lag"]],
-            y=[r["pearson_r"] for r in corr_result["by_lag"]],
-            marker_color=["#2ecc71" if r["pearson_r"] > 0 else "#e74c3c"
-                          for r in corr_result["by_lag"]],
-            name="Pearson r",
-        ))
         fig2.update_layout(**cl)
+        fig2.add_trace(go.Scatter(
+            x=monthly_merged["date"], y=monthly_merged["weighted_usd"],
+            name="Weighted gas (USD/MMBtu)", yaxis="y1",
+            line=dict(color="#009CEA", width=2),
+        ))
+        fig2.add_trace(go.Scatter(
+            x=monthly_merged["date"], y=monthly_merged["avg_usep"],
+            name="Monthly avg USEP (S$/MWh)", yaxis="y2",
+            line=dict(color="#f0b429", width=2, dash="dot"),
+        ))
+        fig2.add_trace(go.Scatter(
+            x=monthly_merged["date"], y=monthly_merged["implied_floor"],
+            name="Implied CCGT floor (S$/MWh)", yaxis="y2",
+            line=dict(color="#e74c3c", width=1.5, dash="dash"),
+        ))
         fig2.update_layout(
-            title="JKM → USEP Pearson Correlation by Lag",
-            xaxis=dict(title="Lag"),
-            yaxis=dict(title="Pearson r", range=[-1, 1]),
+            title=f"Weighted Gas Price vs Monthly Avg USEP  (R²={r2_str} — gas explains {r2_str} of USEP variance)",
+            xaxis=dict(title="Month",
+                       rangeselector=rs_style,
+                       rangeslider=dict(visible=True, thickness=0.04),
+                       type="date"),
+            yaxis=dict(title="Weighted gas (USD/MMBtu)", side="left"),
+            yaxis2=dict(title="USEP / Floor (S$/MWh)", side="right", overlaying="y"),
+            legend=dict(x=0.01, y=0.99),
         )
         st.plotly_chart(fig2, use_container_width=True)
-        st.dataframe(
-            lag_df.rename(columns={
-                "lag_days": "Lag (days)", "pearson_r": "Pearson r",
-                "spearman_rho": "Spearman ρ", "r2": "R²", "n_obs": "N obs",
-            }),
-            use_container_width=True, hide_index=True,
-        )
 
-    if not corr_result["rolling"].empty:
-        roll = corr_result["rolling"]
+        slope = corr_result.get("pass_through_slope")
+        if slope:
+            st.caption(
+                f"**Pass-through:** S${slope:.1f} USEP change per S$1/MMBtu gas change "
+                f"(expected ~7–10 × heat rate; higher value reflects market power + spike premium). "
+                f"{corr_result.get('regime_note', '')}"
+            )
+
+    # ── Chart 3: Gas Supply Mix Evolution (stacked area) ─────────────────────
+    mix_df = gas_mix_evolution(engine)
+    if not mix_df.empty:
+        mix19 = mix_df[mix_df["date"] >= "2019-01-01"]
         fig3 = go.Figure()
+        cl_base = {k: v for k, v in cl.items() if k not in ("xaxis", "yaxis")}
+        fig3.update_layout(**cl_base)
         fig3.add_trace(go.Scatter(
-            x=roll["date"], y=roll["corr_30d"],
-            mode="lines", name="30-day rolling Pearson r",
-            line=dict(color="#9b59b6", width=1.5),
+            x=mix19["date"], y=mix19["malaysia_share_pct"],
+            name="Malaysia piped", stackgroup="one",
+            fillcolor="rgba(0,156,234,0.7)", line=dict(color="#009CEA", width=0),
         ))
-        fig3.add_hline(y=0, line_dash="dash", line_color="#555")
-        fig3.update_layout(**cl)
+        fig3.add_trace(go.Scatter(
+            x=mix19["date"], y=mix19["indonesia_share_pct"],
+            name="Indonesia piped", stackgroup="one",
+            fillcolor="rgba(240,180,41,0.7)", line=dict(color="#f0b429", width=0),
+        ))
+        fig3.add_trace(go.Scatter(
+            x=mix19["date"], y=mix19["lng_share_pct"],
+            name="LNG", stackgroup="one",
+            fillcolor="rgba(231,76,60,0.7)", line=dict(color="#e74c3c", width=0),
+        ))
+        fig3.add_annotation(
+            x="2026-01-01", y=95,
+            text="Full LNG dependency forecast from 2029<br>(S&P Global)",
+            showarrow=False, font=dict(size=10, color="#aaa"),
+            align="left",
+        )
         fig3.update_layout(
-            title="Rolling 30-Day Gas–USEP Correlation",
-            xaxis=dict(title="Date", type="date"),
-            yaxis=dict(title="Pearson r (30d)", range=[-1, 1]),
+            title="Gas Supply Mix Evolution (% volume share)",
+            xaxis=dict(title="Month", type="date"),
+            yaxis=dict(title="Share (%)", range=[0, 100]),
         )
         st.plotly_chart(fig3, use_container_width=True)
+
+    # ── Chart 4: Lag Correlation Bar ──────────────────────────────────────────
+    lags = corr_result.get("lags", [])
+    if lags:
+        best_lag = corr_result.get("best_lag", 0)
+        fig4 = go.Figure()
+        cl_base = {k: v for k, v in cl.items() if k not in ("xaxis", "yaxis")}
+        fig4.update_layout(**cl_base)
+        fig4.add_trace(go.Bar(
+            x=[f"Lag {l['lag_months']}m" for l in lags],
+            y=[l["pearson_r"] for l in lags],
+            marker_color=["#2ecc71" if l["lag_months"] == best_lag else "#009CEA"
+                          for l in lags],
+            hovertemplate="Lag %{x}<br>r = %{y:.3f}<extra></extra>",
+        ))
+        fig4.update_layout(
+            title="Gas Price → USEP Lag Correlation (monthly, Pearson r)",
+            xaxis=dict(title="Lag"),
+            yaxis=dict(title="Pearson r", range=[0, 1]),
+        )
+        st.plotly_chart(fig4, use_container_width=True)
+
+        lag_table = pd.DataFrame(lags).rename(columns={
+            "lag_months": "Lag (months)", "pearson_r": "Pearson r",
+            "spearman_rho": "Spearman ρ", "r2": "R²", "n_obs": "N obs",
+        })
+        st.dataframe(lag_table, use_container_width=True, hide_index=True)
+
+    # ── S&P Global Reference Panel ────────────────────────────────────────────
+    with st.expander("📋 Long-Term Outlook — S&P Global Energy, May 2026"):
+        st.caption("For internal reference only. Not for distribution.")
+        ref_data = {
+            "Year": ["2026", "2027", "2028", "2030", "2035"],
+            "Gas Forecast (USD/MMBtu)": [
+                "~$14 (Q3 peak, Jan–Apr actuals $8–11)",
+                "~$11 (declining LNG spot)",
+                "~$11–12",
+                "~$12 + aging plant retirements",
+                "~$13 (structural tightness)",
+            ],
+            "USEP Forecast (S$/MWh)": [
+                "~$243 (Jul peak); avg ~$155",
+                "~$126 avg",
+                "~$130 avg",
+                "Upward pressure from retirements",
+                "+65% vs 2025 avg",
+            ],
+            "Key Risk": [
+                "LNG spot price spike (Q3 peak demand)",
+                "Indonesia supply decline accelerating",
+                "CCGT retirement schedule uncertainty",
+                "Cross-border imports (Singa COD 2029)",
+                "Grid decarbonisation + storage uptake",
+            ],
+        }
+        st.table(pd.DataFrame(ref_data))
+        st.caption(
+            "Source: S&P Global Energy, *Singapore Power Price Outlook*, May 2026. "
+            "Reproduced for internal research purposes only. © 2026 S&P Global Inc."
+        )
 
 st.divider()
 
@@ -445,7 +589,7 @@ else:
         if len(selected_sources) == 1:
             vint_df = vintage_comparison(engine, selected_sources[0])
             if not vint_df.empty:
-                cl = get_chart_layout(st.session_state["theme"])
+                cl = get_chart_layout()
                 fig = go.Figure()
                 forecast_cols = [c for c in vint_df.columns if c.startswith("forecast_")]
                 for col in forecast_cols:
@@ -482,8 +626,8 @@ else:
                     """), {"src": source_name}).fetchall()
                 return pd.DataFrame(rows, columns=["date", "forecast_usep"])
 
-            cl = get_chart_layout(st.session_state["theme"])
-            rs_style = get_rangeselector_style(st.session_state["theme"])
+            cl = get_chart_layout()
+            rs_style = get_rangeselector_style()
             fig = go.Figure()
 
             usep_daily = _get_daily_usep(engine)

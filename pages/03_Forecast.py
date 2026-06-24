@@ -106,7 +106,7 @@ engine = _get_engine()
 
 if "theme" not in st.session_state:
     st.session_state["theme"] = "dark"
-apply_theme_css(st.session_state["theme"])
+apply_theme_css()
 
 # ── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -131,8 +131,8 @@ st.info(
     "separately as a **historical frequency estimate**, not a prediction."
 )
 
-cl = get_chart_layout(st.session_state["theme"])
-rs = get_rangeselector_style(st.session_state["theme"])
+cl = get_chart_layout()
+rs = get_rangeselector_style()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model status

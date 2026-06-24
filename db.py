@@ -110,12 +110,33 @@ forecast_actuals = Table(
 
 gas_prices = Table(
     "gas_prices", metadata,
-    Column("id",                   Integer, primary_key=True, autoincrement=True),
-    Column("price_date",           Date,    nullable=False),
-    Column("jkm_usd_mmbtu",        Float),
-    Column("piped_gas_sgd_mmbtu",  Float),
-    Column("source",               Text),
-    Column("imported_at",          DateTime),
+    Column("id",                        Integer, primary_key=True, autoincrement=True),
+    Column("price_date",                Date,    nullable=False),
+    # Volumes (metric tons)
+    Column("malaysia_vol_mt",           Float),
+    Column("indonesia_vol_mt",          Float),
+    Column("lng_vol_mt",                Float),
+    Column("total_vol_mt",              Float),
+    # Values (USD)
+    Column("malaysia_val_usd",          Float),
+    Column("indonesia_val_usd",         Float),
+    Column("lng_val_usd",               Float),
+    # Prices from customs data (USD/MMBtu)
+    Column("malaysia_price_usd_mmbtu",  Float),
+    Column("indonesia_price_usd_mmbtu", Float),
+    Column("lng_price_usd_mmbtu",       Float),
+    # Volume-weighted average (LNG: 1 MT = 52 MMBtu; piped: 1 MT = 50 MMBtu)
+    Column("weighted_avg_usd_mmbtu",    Float),
+    # Source share (%)
+    Column("malaysia_share_pct",        Float),
+    Column("indonesia_share_pct",       Float),
+    Column("lng_share_pct",             Float),
+    # SGD conversion and CCGT cost floor
+    Column("fx_rate_usd_sgd",           Float, default=1.35),
+    Column("weighted_avg_sgd_mmbtu",    Float),
+    Column("implied_usep_floor_sgd_mwh", Float),  # weighted_sgd × 7.5 MMBtu/MWh
+    Column("source",                    Text, default="SG Customs"),
+    Column("imported_at",               DateTime),
     UniqueConstraint("price_date", name="uq_gas_price_date"),
 )
 
@@ -141,8 +162,31 @@ def setup_database(engine) -> None:
     """Create all tables; migrate existing ones with new columns."""
     metadata.create_all(engine)
 
-    # Migrate forecast_sources with new Phase 4 columns
     with engine.begin() as conn:
+        # forecast_sources Phase 4 columns
         _add_column_safe(conn, "forecast_sources", "vintage_year",  "INTEGER")
         _add_column_safe(conn, "forecast_sources", "forecast_type", "TEXT")
         _add_column_safe(conn, "forecast_sources", "granularity",   "TEXT")
+
+        # gas_prices Phase 4 full schema migration
+        new_gas_cols = [
+            ("malaysia_vol_mt",            "REAL"),
+            ("indonesia_vol_mt",           "REAL"),
+            ("lng_vol_mt",                 "REAL"),
+            ("total_vol_mt",               "REAL"),
+            ("malaysia_val_usd",           "REAL"),
+            ("indonesia_val_usd",          "REAL"),
+            ("lng_val_usd",                "REAL"),
+            ("malaysia_price_usd_mmbtu",   "REAL"),
+            ("indonesia_price_usd_mmbtu",  "REAL"),
+            ("lng_price_usd_mmbtu",        "REAL"),
+            ("weighted_avg_usd_mmbtu",     "REAL"),
+            ("malaysia_share_pct",         "REAL"),
+            ("indonesia_share_pct",        "REAL"),
+            ("lng_share_pct",              "REAL"),
+            ("fx_rate_usd_sgd",            "REAL DEFAULT 1.35"),
+            ("weighted_avg_sgd_mmbtu",     "REAL"),
+            ("implied_usep_floor_sgd_mwh", "REAL"),
+        ]
+        for col, defn in new_gas_cols:
+            _add_column_safe(conn, "gas_prices", col, defn)

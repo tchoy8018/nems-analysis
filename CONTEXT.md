@@ -13,7 +13,19 @@
 - File: data/nems_master.db
 - Rows: 130,704 | Range: 2019-01-01 → 2026-06-16 | Coverage: 99.96%
 - Schema: nems_prices, forecast_sources, forecast_data, model_registry,
-          forecast_actuals (Phase 4), gas_prices (Phase 4)
+          forecast_actuals (Phase 4), gas_prices (Phase 4 — full schema)
+
+## Gas Price Data
+- Source: S&P Global Energy / Singapore Customs Gas Trade Data Tables, June 2026
+- File: data/gas/sg_gas_trade_data_2026.xlsx (gitignored)
+- 184 rows: 2011-01-01 → 2026-04-01 (monthly)
+- Columns: malaysia/indonesia/lng volumes, values, prices + weighted avg + implied CCGT floor
+- Conversion: LNG 1 MT = 52 MMBtu; piped gas 1 MT = 50 MMBtu; heat rate = 7.5 MMBtu/MWh
+- FX default: 1.35 USD/SGD (fx_rate_usd_sgd column, overrideable)
+- Apr 2026: weighted avg $11.24 USD/MMBtu → implied floor S$113.8/MWh; LNG share 48%
+- Gas→USEP correlation: Pearson r=0.659 (lag 0m), Spearman=0.826; R²=0.435
+- Pass-through slope: 18.8 SGD/MWh per SGD/MMBtu (higher than heat rate — market power premium)
+- Regime: correlation stronger pre-2022 (r=0.75) when piped gas dominated; LNG spot volatility post-2022 weakens link
 
 ## Phase Status
 - [x] Phase 1: Scaffold, DB ingestion, bootstrap, Streamlit app (dark theme)
@@ -21,7 +33,9 @@
 - [x] Phase 3: Forecasting — XGBoost + Prophet + Ensemble, backtest, pages/03_Forecast.py
 - [x] Phase 4: Market Intelligence Hub
   - [x] Module 1: forecast_actuals table, check_model_drift, save_predictions_to_db, ingest_and_retrain
-  - [x] Module 2: gas_prices table, ingest_gas_prices, gas_usep_correlation (lag analysis)
+  - [x] Module 2: gas_prices table (full schema), ingest_gas_prices (S&P Global/Customs workbook parser),
+              gas_usep_correlation (monthly, 4 lags, pass-through regression, rolling 12m Pearson),
+              gas_mix_evolution, gas features in build_features (implied_usep_floor, lng_share, lag1m/2m)
   - [x] Module 3: ingest_analyst_forecast (granularity expansion), analyst_vs_actuals, vintage_comparison
   - [x] Module 4: get_sg_calendar_features, day_type_usep_profile
   - [x] Module 5: pages/06_Data_Hub.py (5 sections)
@@ -81,4 +95,4 @@ This spread × contracted volume = incremental annual revenue above CfD floor
 - Available BESS dispatch window = periods where solar > contracted delivery profile
 
 ## Last Updated
-2026-06-25 (Phase 4 complete)
+2026-06-25 (Gas price integration — SG Customs data)
