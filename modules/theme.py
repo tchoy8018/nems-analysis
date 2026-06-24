@@ -136,3 +136,15 @@ hr {{
 def get_chart_layout() -> dict:
     """Return Plotly layout dict for the current theme."""
     return dict(THEMES[get_theme()]["chart"])
+
+
+def get_rangeselector_style() -> dict:
+    """Return Plotly rangeselector kwargs styled for the current theme."""
+    cfg = THEMES[get_theme()]
+    return dict(
+        bgcolor=cfg["secondaryBackgroundColor"],
+        activecolor="#009CEA",
+        font=dict(color=cfg["textColor"], size=11),
+        borderwidth=1,
+        bordercolor="#009CEA",
+    )

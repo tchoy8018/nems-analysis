@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db import get_engine, setup_database
-from modules.analysis import duck_curve, yoy_monthly_comparison
+from modules.analysis import duck_curve
 from modules.theme import apply_theme_css, get_chart_layout, render_theme_toggle
 from config import COLOR_DEMAND, COLOR_SOLAR, COLOR_USEP
 
@@ -28,8 +28,7 @@ def load_duck_data(_engine, start: date, end: date) -> pd.DataFrame:
         rows = conn.execute(text("""
             SELECT date, period, usep, demand_mw, solar_mw
             FROM nems_prices
-            WHERE date >= :s AND date <= :e
-              AND demand_mw IS NOT NULL
+            WHERE date >= :s AND date <= :e AND demand_mw IS NOT NULL
             ORDER BY date, period
         """), {"s": start, "e": end}).fetchall()
     if not rows:
@@ -44,7 +43,8 @@ def load_duck_for_year(_engine, year: int) -> pd.DataFrame:
     from sqlalchemy import text
     with _engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT period, AVG(demand_mw) AS demand_mw,
+            SELECT period,
+                   AVG(demand_mw) AS demand_mw,
                    AVG(solar_mw) AS solar_mw,
                    AVG(demand_mw - COALESCE(solar_mw, 0)) AS net_demand
             FROM nems_prices
@@ -74,10 +74,19 @@ def _period_to_hhmm(period: int) -> str:
     return f"{h:02d}:{m:02d}"
 
 
-def _x_axis_ticks():
-    """Return tick positions (period numbers) and labels every 6 periods."""
-    tick_periods = list(range(1, 49, 6))
-    return tick_periods, [_period_to_hhmm(p) for p in tick_periods]
+def _make_period_xaxis(cl: dict, p_min: int, p_max: int) -> dict:
+    """Build an xaxis dict with time-of-day tick labels."""
+    tick_periods = [p for p in range(1, 49, 6) if p_min <= p <= p_max]
+    if not tick_periods:
+        tick_periods = [p_min, p_max]
+    return dict(
+        tickmode="array",
+        tickvals=tick_periods,
+        ticktext=[_period_to_hhmm(p) for p in tick_periods],
+        title="Time of day (SGT)",
+        range=[p_min - 0.5, p_max + 0.5],
+        **cl.get("xaxis", {}),
+    )
 
 
 st.set_page_config(page_title="Duck Curve — NEMS", layout="wide")
@@ -103,6 +112,16 @@ with st.sidebar:
                                min_value=db_min, max_value=db_max)
 
     st.divider()
+    st.markdown("**Period filter (time of day)**")
+    p_min, p_max = st.slider(
+        "Select period range",
+        min_value=1, max_value=48,
+        value=(1, 48),
+        help="Each period = 30 min. Period 1 = 00:00, Period 48 = 23:30 SGT",
+    )
+    st.caption(f"{_period_to_hhmm(p_min)} — {_period_to_hhmm(p_max)} SGT")
+
+    st.divider()
     st.markdown("**YoY comparison years**")
     available_years = list(range(db_min.year, db_max.year + 1))
     yoy_years = st.multiselect(
@@ -124,44 +143,40 @@ if df.empty:
     st.stop()
 
 dc = duck_curve(df)
+dc_view = dc[(dc["period"] >= p_min) & (dc["period"] <= p_max)]
+
 cl = get_chart_layout()
-tick_periods, tick_labels = _x_axis_ticks()
+xax = _make_period_xaxis(cl, p_min, p_max)
 
 # ── Duck curve chart ──────────────────────────────────────────────────────────
 st.subheader("Duck curve — Demand, Solar, Net Demand")
 
 fig_dc = go.Figure()
 fig_dc.update_layout(**cl)
-
 fig_dc.add_trace(go.Scatter(
-    x=dc["period"], y=dc["demand_mw"],
+    x=dc_view["period"], y=dc_view["demand_mw"],
     mode="lines", name="Demand",
     line=dict(color=COLOR_DEMAND, width=2.5),
     hovertemplate="Period %{x} (%{customdata})<br>Demand: %{y:.0f} MW<extra></extra>",
-    customdata=dc["time_label"],
+    customdata=dc_view["time_label"],
 ))
 fig_dc.add_trace(go.Scatter(
-    x=dc["period"], y=dc["solar_mw"],
+    x=dc_view["period"], y=dc_view["solar_mw"],
     mode="lines", name="Solar",
     line=dict(color=COLOR_SOLAR, width=2.5),
     hovertemplate="Period %{x} (%{customdata})<br>Solar: %{y:.0f} MW<extra></extra>",
-    customdata=dc["time_label"],
+    customdata=dc_view["time_label"],
 ))
 fig_dc.add_trace(go.Scatter(
-    x=dc["period"], y=dc["net_demand"],
+    x=dc_view["period"], y=dc_view["net_demand"],
     mode="lines", name="Net Demand",
     line=dict(color=COLOR_USEP, width=2.5),
     fill="tozeroy", fillcolor="rgba(0,156,234,0.08)",
     hovertemplate="Period %{x} (%{customdata})<br>Net: %{y:.0f} MW<extra></extra>",
-    customdata=dc["time_label"],
+    customdata=dc_view["time_label"],
 ))
-
 fig_dc.update_layout(
-    height=400,
-    xaxis=dict(
-        tickmode="array", tickvals=tick_periods, ticktext=tick_labels,
-        title="Time of day (SGT)", **cl.get("xaxis", {}),
-    ),
+    height=400, xaxis=xax,
     yaxis=dict(title="MW", **cl.get("yaxis", {})),
     hovermode="x unified", showlegend=True,
 )
@@ -172,8 +187,9 @@ st.divider()
 # ── USEP by period bar chart ──────────────────────────────────────────────────
 st.subheader("Average USEP by period")
 
+df_view = df[(df["period"] >= p_min) & (df["period"] <= p_max)]
 usep_profile = (
-    df.groupby("period")["usep"]
+    df_view.groupby("period")["usep"]
     .mean()
     .reset_index()
     .rename(columns={"usep": "avg_usep"})
@@ -193,21 +209,16 @@ fig_bar.add_trace(go.Bar(
     hovertemplate="Period %{x} (%{customdata})<br>Avg USEP: S$%{y:.2f}/MWh<extra></extra>",
     customdata=usep_profile["time_label"],
 ))
-fig_bar.update_layout(
-    height=320,
-    xaxis=dict(
-        tickmode="array", tickvals=tick_periods, ticktext=tick_labels,
-        title="Time of day (SGT)", **cl.get("xaxis", {}),
-    ),
-    yaxis=dict(title="Avg USEP (S$/MWh)", **cl.get("yaxis", {})),
-)
-# Legend annotation for colour bands
-for color, label in [("#2ecc71", "< $100"), ("#f0b429", "$100–200"), ("#e74c3c", "> $200")]:
+# Colour legend entries
+for color, label in [("#2ecc71", "< $100/MWh"), ("#f0b429", "$100–200/MWh"), ("#e74c3c", "> $200/MWh")]:
     fig_bar.add_trace(go.Scatter(
         x=[None], y=[None], mode="markers",
-        marker=dict(size=10, color=color),
-        name=label,
+        marker=dict(size=10, color=color, symbol="square"), name=label,
     ))
+fig_bar.update_layout(
+    height=320, xaxis=xax,
+    yaxis=dict(title="Avg USEP (S$/MWh)", **cl.get("yaxis", {})),
+)
 st.plotly_chart(fig_bar, use_container_width=True)
 
 st.divider()
@@ -216,40 +227,35 @@ st.divider()
 st.subheader("Solar suppression — USEP by period: high-solar vs low-solar months")
 
 df["month"] = df["date"].dt.month
-# High-solar: Oct–Feb; low-solar: May–Aug
-df_high = df[df["month"].isin([10, 11, 12, 1, 2])]
-df_low  = df[df["month"].isin([5, 6, 7, 8])]
+df_hs = df[(df["month"].isin([10, 11, 12, 1, 2])) & (df["period"] >= p_min) & (df["period"] <= p_max)]
+df_ls = df[(df["month"].isin([5, 6, 7, 8]))        & (df["period"] >= p_min) & (df["period"] <= p_max)]
 
-usep_high = df_high.groupby("period")["usep"].mean().reset_index().rename(columns={"usep": "avg_usep"})
-usep_low  = df_low.groupby("period")["usep"].mean().reset_index().rename(columns={"usep": "avg_usep"})
+usep_hs = df_hs.groupby("period")["usep"].mean().reset_index().rename(columns={"usep": "avg_usep"})
+usep_ls = df_ls.groupby("period")["usep"].mean().reset_index().rename(columns={"usep": "avg_usep"})
 
 fig_sup = go.Figure()
 fig_sup.update_layout(**cl)
 fig_sup.add_trace(go.Scatter(
-    x=usep_high["period"], y=usep_high["avg_usep"],
+    x=usep_hs["period"], y=usep_hs["avg_usep"],
     mode="lines", name="High-solar months (Oct–Feb)",
     line=dict(color=COLOR_SOLAR, width=2),
     hovertemplate="Period %{x}<br>Avg USEP: S$%{y:.2f}/MWh<extra></extra>",
 ))
 fig_sup.add_trace(go.Scatter(
-    x=usep_low["period"], y=usep_low["avg_usep"],
+    x=usep_ls["period"], y=usep_ls["avg_usep"],
     mode="lines", name="Low-solar months (May–Aug)",
     line=dict(color=COLOR_DEMAND, width=2),
     hovertemplate="Period %{x}<br>Avg USEP: S$%{y:.2f}/MWh<extra></extra>",
 ))
 fig_sup.update_layout(
-    height=340,
-    xaxis=dict(
-        tickmode="array", tickvals=tick_periods, ticktext=tick_labels,
-        title="Time of day (SGT)", **cl.get("xaxis", {}),
-    ),
+    height=340, xaxis=xax,
     yaxis=dict(title="Avg USEP (S$/MWh)", **cl.get("yaxis", {})),
     hovermode="x unified",
 )
 st.plotly_chart(fig_sup, use_container_width=True)
 st.caption(
-    "Solar suppression effect: during high-solar months, mid-day USEP (periods 14–28) "
-    "is pushed lower by excess solar generation feeding into the grid."
+    "Solar suppression: during high-solar months, mid-day USEP (periods 14–28) is "
+    "pushed lower by excess solar generation. The BESS captures this intraday spread."
 )
 
 st.divider()
@@ -268,26 +274,27 @@ else:
         yr_df = load_duck_for_year(engine, yr)
         if yr_df.empty:
             continue
+        yr_view = yr_df[(yr_df["period"] >= p_min) & (yr_df["period"] <= p_max)]
         color = YOY_COLORS[i % len(YOY_COLORS)]
         fig_yoy.add_trace(go.Scatter(
-            x=yr_df["period"], y=yr_df["net_demand"],
+            x=yr_view["period"], y=yr_view["net_demand"],
             mode="lines", name=str(yr),
             line=dict(color=color, width=2),
-            hovertemplate=f"{yr} — Period %{{x}} (%{{customdata}})<br>Net Demand: %{{y:.0f}} MW<extra></extra>",
-            customdata=yr_df["time_label"],
+            hovertemplate=(
+                f"{yr} — Period %{{x}} (%{{customdata}})<br>"
+                "Net Demand: %{y:.0f} MW<extra></extra>"
+            ),
+            customdata=yr_view["time_label"],
         ))
 
     fig_yoy.update_layout(
-        height=380,
-        xaxis=dict(
-            tickmode="array", tickvals=tick_periods, ticktext=tick_labels,
-            title="Time of day (SGT)", **cl.get("xaxis", {}),
-        ),
+        height=380, xaxis=xax,
         yaxis=dict(title="Net Demand (MW)", **cl.get("yaxis", {})),
         hovermode="x unified",
     )
     st.plotly_chart(fig_yoy, use_container_width=True)
     st.caption(
-        "Net Demand = System Demand − Solar. The deepening mid-day trough from 2020→2026 "
-        "reflects Singapore's rapidly growing rooftop and utility-scale solar capacity."
+        "Net Demand = System Demand − Solar. The deepening mid-day trough from "
+        "2020→2026 reflects Singapore's growing solar capacity. Our 560 MW "
+        "solar + BESS will deepen this further post-2029."
     )

@@ -1,4 +1,3 @@
-import io
 import tempfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -14,7 +13,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from db import get_engine, setup_database
 from modules.analysis import spike_analysis
 from modules.ingestion import import_csv_to_db
-from modules.theme import apply_theme_css, get_chart_layout, render_theme_toggle
+from modules.theme import (
+    apply_theme_css, get_chart_layout, get_rangeselector_style,
+    render_theme_toggle,
+)
 from config import COLOR_USEP, COLOR_SPIKE
 
 
@@ -45,7 +47,6 @@ def load_usep_range(_engine, start: date, end: date) -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def load_heatmap_data(_engine, start: date, end: date) -> pd.DataFrame:
-    """Return avg USEP per (year_month, period)."""
     from sqlalchemy import text
     with _engine.connect() as conn:
         rows = conn.execute(text("""
@@ -84,7 +85,7 @@ st.set_page_config(page_title="Market Overview — NEMS", layout="wide")
 engine = _get_engine()
 apply_theme_css()
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("⚡ NEMS Analytics")
     st.caption("Singa Renewables")
@@ -96,8 +97,10 @@ with st.sidebar:
     db_max = pd.to_datetime(status.get("max_d", date.today())).date()
 
     st.markdown("**Analysis period**")
-    start_date = st.date_input("From", value=db_max - timedelta(days=365), min_value=db_min, max_value=db_max)
-    end_date   = st.date_input("To",   value=db_max, min_value=db_min, max_value=db_max)
+    start_date = st.date_input("From", value=db_max - timedelta(days=365),
+                               min_value=db_min, max_value=db_max)
+    end_date   = st.date_input("To",   value=db_max,
+                               min_value=db_min, max_value=db_max)
 
     st.divider()
     st.markdown("**Database**")
@@ -105,7 +108,7 @@ with st.sidebar:
         st.metric("Total rows", f"{status['n']:,}")
         st.caption(f"{status['min_d']} → {status['max_d']}")
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 st.title("📊 Market Overview")
 
 if start_date >= end_date:
@@ -118,8 +121,9 @@ if df.empty:
     st.stop()
 
 cl = get_chart_layout()
+rs = get_rangeselector_style()
 
-# ── KPI row ──────────────────────────────────────────────────────────────────
+# ── KPI row ───────────────────────────────────────────────────────────────────
 avg_usep   = df["usep"].mean()
 max_usep   = df["usep"].max()
 spikes_n   = int((df["usep"] > 200).sum())
@@ -134,13 +138,12 @@ c4.metric("Avg Demand", f"{avg_demand:,.0f} MW")
 
 st.divider()
 
-# ── USEP time-series ─────────────────────────────────────────────────────────
+# ── USEP time-series ──────────────────────────────────────────────────────────
 st.subheader("USEP over selected period")
 
 rolling = (
     df.set_index("datetime")["usep"]
-    .rolling("30D")
-    .mean()
+    .rolling("30D").mean()
     .reset_index()
     .rename(columns={"usep": "rolling_avg"})
 )
@@ -168,9 +171,28 @@ fig_ts.add_trace(go.Scatter(
     line=dict(color="#f0b429", width=1.5, dash="dot"),
     hovertemplate="30-day avg: S$%{y:.2f}/MWh<extra></extra>",
 ))
+
 fig_ts.update_layout(
-    height=380, xaxis_title="Date", yaxis_title="USEP (S$/MWh)",
-    hovermode="x unified", showlegend=True,
+    height=400,
+    yaxis_title="USEP (S$/MWh)",
+    hovermode="x unified",
+    showlegend=True,
+    xaxis=dict(
+        rangeselector=dict(
+            buttons=[
+                dict(count=1,  label="1M",  step="month", stepmode="backward"),
+                dict(count=3,  label="3M",  step="month", stepmode="backward"),
+                dict(count=6,  label="6M",  step="month", stepmode="backward"),
+                dict(count=1,  label="YTD", step="year",  stepmode="todate"),
+                dict(count=1,  label="1Y",  step="year",  stepmode="backward"),
+                dict(step="all", label="All"),
+            ],
+            **rs,
+        ),
+        rangeslider=dict(visible=True, thickness=0.04),
+        type="date",
+        **cl.get("xaxis", {}),
+    ),
 )
 st.plotly_chart(fig_ts, use_container_width=True)
 
@@ -182,10 +204,9 @@ st.subheader("Monthly heatmap — avg USEP by period")
 hm_df = load_heatmap_data(engine, start_date, end_date)
 if not hm_df.empty:
     pivot = hm_df.pivot(index="year_month", columns="period", values="avg_usep")
-    # X-axis tick labels every 6 periods (3 h)
     tick_periods = list(range(1, 49, 6))
     tick_labels  = [_period_to_hhmm(p) for p in tick_periods]
-    tick_indices = [p - 1 for p in tick_periods]   # 0-based column indices
+    tick_indices = [p - 1 for p in tick_periods]  # 0-based column indices
 
     fig_hm = px.imshow(
         pivot,
@@ -193,8 +214,10 @@ if not hm_df.empty:
         aspect="auto",
         labels={"x": "Period", "y": "Month", "color": "Avg USEP (S$/MWh)"},
     )
+    # Apply theme base styles first, then override axes separately (avoids duplicate key error)
+    cl_base = {k: v for k, v in cl.items() if k not in ("xaxis", "yaxis")}
+    fig_hm.update_layout(**cl_base)
     fig_hm.update_layout(
-        **cl,
         height=max(300, len(pivot) * 18 + 80),
         xaxis=dict(
             tickmode="array",
@@ -239,7 +262,7 @@ else:
 
 st.divider()
 
-# ── CSV upload ───────────────────────────────────────────────────────────────
+# ── CSV upload ────────────────────────────────────────────────────────────────
 st.subheader("Upload EMC monthly CSV")
 st.caption(
     "Upload a raw EMC market data CSV (same column format as the master Excel). "
@@ -259,7 +282,7 @@ if uploaded is not None:
     if result["errors"]:
         st.error("Import failed: " + "; ".join(result["errors"]))
     else:
-        n = result["rows_imported"]
+        n  = result["rows_imported"]
         sk = result["rows_skipped"]
         dr = result.get("date_range")
         st.success(
@@ -267,7 +290,6 @@ if uploaded is not None:
             + (f", {sk:,} duplicates skipped" if sk else "")
             + (f"  —  {dr['min']} → {dr['max']}" if dr else "")
         )
-        # Clear cached query results so the page refreshes with new data
         load_usep_range.clear()
         load_heatmap_data.clear()
         load_db_status.clear()
