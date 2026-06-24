@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from db import get_engine, setup_database
-from modules.utils import CHART_TEMPLATE
+from modules.theme import apply_theme_css, get_chart_layout, render_theme_toggle
 from config import COLOR_USEP, COLOR_SPIKE
 
 
@@ -80,11 +80,13 @@ def main():
     )
 
     engine = _get_engine()
+    apply_theme_css()
 
     # --- Sidebar ---
     with st.sidebar:
         st.title("⚡ NEMS Analytics")
         st.caption("Singa Renewables Intelligence Platform")
+        render_theme_toggle()
         st.divider()
 
         status = load_db_status(engine)
@@ -145,7 +147,7 @@ def main():
     rolling.columns = ["datetime", "rolling_avg"]
 
     fig = go.Figure()
-    fig.update_layout(**CHART_TEMPLATE["layout"])
+    fig.update_layout(**get_chart_layout())
 
     spike_mask = df["usep"] > 200
 
