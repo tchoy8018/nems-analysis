@@ -269,8 +269,8 @@ fig_profile.add_trace(go.Scatter(
     line=dict(color="#f0b429", width=1.5, dash="dot"),
     hoverinfo="skip",
 ))
-above = period_avg["avg_usep"].clip(lower=avg_daily_usep)
-below = period_avg["avg_usep"].clip(upper=avg_daily_usep)
+above = period_avg["avg_usep"].clip(avg_daily_usep)
+below = period_avg["avg_usep"].clip(None, avg_daily_usep)
 
 fig_profile.add_trace(go.Scatter(
     x=period_avg["period"], y=above,
@@ -468,7 +468,7 @@ def _revenue_by_plf(daily_usep_mean: float, daily_upside_mean: float,
 
 # Use actual spread per shifted MWh from the computed daily data
 shift_mwh = daily["bess_shift_mwh"].mean()
-avg_spread_per_mwh = (daily["market_upside"] / shift_mwh.clip(lower=1)).mean()
+avg_spread_per_mwh = (daily["market_upside"] / max(float(shift_mwh), 1.0)).mean()
 
 plf_rows = []
 plf_cfd_vals, plf_up_vals, plf_labels = [], [], []
