@@ -17,6 +17,7 @@ from modules.theme import (
     apply_theme_css, get_chart_layout, get_rangeselector_style,
     render_theme_toggle,
 )
+from modules.utils import get_holidays_in_range
 from config import COLOR_USEP, COLOR_SPIKE
 
 
@@ -103,6 +104,16 @@ with st.sidebar:
                                min_value=db_min, max_value=db_max)
 
     st.divider()
+    st.markdown("**Spike Threshold**")
+    spike_threshold = st.select_slider(
+        "Threshold (S$/MWh)",
+        options=[100, 150, 200, 250, 300, 400, 500, 1000],
+        value=200,
+        label_visibility="collapsed",
+        key="spike_thr_01",
+    )
+
+    st.divider()
     st.markdown("**Database**")
     if status.get("n"):
         st.metric("Total rows", f"{status['n']:,}")
@@ -126,14 +137,15 @@ rs = get_rangeselector_style()
 # ── KPI row ───────────────────────────────────────────────────────────────────
 avg_usep   = df["usep"].mean()
 max_usep   = df["usep"].max()
-spikes_n   = int((df["usep"] > 200).sum())
+spikes_n   = int((df["usep"] > spike_threshold).sum())
 spike_pct  = 100.0 * spikes_n / len(df)
 avg_demand = df["demand_mw"].mean() if "demand_mw" in df.columns else 0
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Avg USEP", f"S${avg_usep:.2f}/MWh")
 c2.metric("Peak USEP", f"S${max_usep:.2f}/MWh")
-c3.metric("Spike Freq (>$200)", f"{spike_pct:.1f}%", help=f"{spikes_n:,} periods")
+c3.metric(f"Spike Freq (>S${spike_threshold})", f"{spike_pct:.1f}%",
+          help=f"{spikes_n:,} periods above S${spike_threshold}/MWh")
 c4.metric("Avg Demand", f"{avg_demand:,.0f} MW")
 
 st.divider()
@@ -148,7 +160,7 @@ rolling = (
     .rename(columns={"usep": "rolling_avg"})
 )
 
-spike_mask = df["usep"] > 200
+spike_mask = df["usep"] > spike_threshold
 fig_ts = go.Figure()
 fig_ts.update_layout(**cl)
 
@@ -161,9 +173,28 @@ fig_ts.add_trace(go.Scattergl(
 if spike_mask.any():
     fig_ts.add_trace(go.Scattergl(
         x=df.loc[spike_mask, "datetime"], y=df.loc[spike_mask, "usep"],
-        mode="markers", name="Spike >$200",
+        mode="markers", name=f"Spike >S${spike_threshold}",
         marker=dict(color=COLOR_SPIKE, size=4),
         hovertemplate="<b>%{x}</b><br>USEP: S$%{y:.2f}/MWh<extra></extra>",
+    ))
+
+# Holiday vertical dashed lines (amber)
+_holidays = get_holidays_in_range(start_date, end_date)
+for _h in _holidays:
+    fig_ts.add_vline(
+        x=pd.Timestamp(_h["date"]).timestamp() * 1000,
+        line_dash="dash", line_color="#f0b429", line_width=1, opacity=0.6,
+    )
+if _holidays:
+    _h_x    = [pd.Timestamp(_h["date"]) + pd.Timedelta(hours=12) for _h in _holidays]
+    _h_y    = [float(df["usep"].quantile(0.92))] * len(_holidays)
+    _h_text = [_h["name"] for _h in _holidays]
+    fig_ts.add_trace(go.Scatter(
+        x=_h_x, y=_h_y, mode="markers",
+        marker=dict(color="#f0b429", size=7, symbol="triangle-down"),
+        name="Public Holiday",
+        customdata=_h_text,
+        hovertemplate="<b>%{customdata}</b><extra></extra>",
     ))
 fig_ts.add_trace(go.Scatter(
     x=rolling["datetime"], y=rolling["rolling_avg"],
@@ -236,9 +267,9 @@ else:
 st.divider()
 
 # ── Spike event table ─────────────────────────────────────────────────────────
-st.subheader("Spike events — USEP > S$200/MWh")
+st.subheader(f"Spike events — USEP > S${spike_threshold}/MWh")
 
-spike_df = spike_analysis(df, threshold=200)
+spike_df = spike_analysis(df, threshold=spike_threshold)
 if spike_df.empty:
     st.success("No spikes in the selected period.")
 else:
