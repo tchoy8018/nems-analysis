@@ -90,6 +90,63 @@ def load_model_registry(_engine):
     return [dict(r) for r in rows]
 
 
+@st.cache_data(ttl=60)
+def _get_model_performance(_engine) -> pd.DataFrame:
+    """Build a unified model performance table from model_registry."""
+    from sqlalchemy import text
+    with _engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT model_name, trained_at, training_rows, rmse, mae, mape
+            FROM model_registry WHERE is_active = 1
+            ORDER BY CASE model_name
+                WHEN 'xgboost'          THEN 1
+                WHEN 'prophet'          THEN 2
+                WHEN 'ensemble'         THEN 3
+                WHEN 'spike_classifier' THEN 4
+                ELSE 5 END
+        """)).fetchall()
+    if not rows:
+        return pd.DataFrame()
+
+    label_map = {
+        "xgboost": "XGBoost", "prophet": "Prophet",
+        "ensemble": "Ensemble", "spike_classifier": "Spike Classifier",
+    }
+    perf = []
+    for model_name, trained_at, training_rows, rmse, mae, mape in rows:
+        label = label_map.get(model_name, model_name)
+        ta    = str(trained_at or "")[:16]
+        tr    = f"{int(training_rows):,}" if training_rows else "—"
+        if model_name == "spike_classifier":
+            perf.append({
+                "Model":         label,
+                "Trained":       ta,
+                "Train rows":    tr,
+                "Primary":       f"F1 = {1 - float(rmse):.3f}" if rmse is not None else "N/A",
+                "Secondary":     f"Prec = {1 - float(mae):.3f}" if mae is not None else "N/A",
+                "Tertiary":      f"Recall = {1 - float(mape):.3f}" if mape is not None else "N/A",
+            })
+        elif model_name == "ensemble":
+            perf.append({
+                "Model":      label,
+                "Trained":    ta,
+                "Train rows": "—",
+                "Primary":    f"RMSE = S${float(rmse):.1f}/MWh" if rmse else "N/A",
+                "Secondary":  "blended (XGB+Prophet)",
+                "Tertiary":   "—",
+            })
+        else:
+            perf.append({
+                "Model":      label,
+                "Trained":    ta,
+                "Train rows": tr,
+                "Primary":    f"RMSE = S${float(rmse):.1f}/MWh" if rmse else "N/A",
+                "Secondary":  f"MAE = S${float(mae):.1f}/MWh"   if mae  else "N/A",
+                "Tertiary":   f"MAPE = {float(mape):.1f}%"       if mape else "N/A",
+            })
+    return pd.DataFrame(perf)
+
+
 def _model_file_exists(name: str) -> bool:
     return (MODELS_DIR / f"{name}_model.joblib").exists()
 
@@ -544,45 +601,16 @@ with tab_st:
     st.divider()
     st.subheader("📊 Model Performance")
 
-    if not (xgb_ready or pro_ready):
-        st.info("Train at least one model to see performance metrics.")
+    perf_df = _get_model_performance(engine)
+    if perf_df.empty:
+        st.info("No trained models found. Click **🔄 Retrain All Models** above to train.")
     else:
-        perf_rows = []
-        for mname, mlabel in [("xgboost", "XGBoost"), ("prophet", "Prophet"),
-                               ("ensemble", "Ensemble"), ("spike_classifier", "Spike Clf")]:
-            if mname not in reg_map:
-                continue
-            r = reg_map[mname]
-            if mname == "spike_classifier":
-                perf_rows.append({
-                    "Model":    mlabel,
-                    "F1":       f"{1 - r['rmse']:.3f}" if r.get("rmse") is not None else "N/A",
-                    "Precision": f"{1 - r['mae']:.3f}" if r.get("mae")  is not None else "N/A",
-                    "Recall":   f"{1 - r['mape']:.3f}" if r.get("mape") is not None else "N/A",
-                    "Training rows": f"{r.get('training_rows') or 0:,}",
-                })
-            elif mname == "ensemble":
-                perf_rows.append({
-                    "Model":    mlabel,
-                    "RMSE":     f"S${r['rmse']:.1f}/MWh" if r.get("rmse") else "N/A",
-                    "MAE":      "—",
-                    "MAPE":     "—",
-                    "Training rows": "—",
-                })
-            else:
-                perf_rows.append({
-                    "Model":    mlabel,
-                    "RMSE":     f"S${r['rmse']:.1f}/MWh" if r.get("rmse") else "N/A",
-                    "MAE":      f"S${r['mae']:.1f}/MWh"  if r.get("mae")  else "N/A",
-                    "MAPE":     f"{r['mape']:.1f}%"       if r.get("mape") else "N/A",
-                    "Training rows": f"{r.get('training_rows') or 0:,}",
-                })
-        if perf_rows:
-            st.dataframe(pd.DataFrame(perf_rows), use_container_width=True, hide_index=True)
+        st.dataframe(perf_df, use_container_width=True, hide_index=True)
         st.caption(
             "High RMSE is driven by unpredictable spike events (USEP can reach "
             "S$4,500/MWh during grid stress). MAE reflects typical off-peak accuracy. "
-            "Prophet RMSE is on daily averages — multiply by ~1.5× for half-hourly equivalent."
+            "Prophet RMSE is on daily averages — multiply by ~1.5× for half-hourly equivalent. "
+            "Spike Classifier metrics: F1 = harmonic mean of precision & recall."
         )
 
     st.divider()

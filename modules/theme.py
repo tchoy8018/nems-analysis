@@ -1,69 +1,6 @@
 import streamlit as st
 import streamlit.components.v1 as components
 
-THEMES = {
-    "dark": {
-        "backgroundColor": "#0d1117",
-        "secondaryBackgroundColor": "#161b22",
-        "textColor": "#e6edf3",
-        "chart": {
-            "paper_bgcolor": "#0d1117",
-            "plot_bgcolor": "#161b22",
-            "font": {"color": "#e6edf3", "family": "Inter, sans-serif", "size": 12},
-            "xaxis": {
-                "gridcolor": "#21262d",
-                "linecolor": "#30363d",
-                "zerolinecolor": "#21262d",
-            },
-            "yaxis": {
-                "gridcolor": "#21262d",
-                "linecolor": "#30363d",
-                "zerolinecolor": "#21262d",
-            },
-            "legend": {"bgcolor": "#161b22", "bordercolor": "#30363d", "borderwidth": 1},
-            "hoverlabel": {
-                "bgcolor": "#21262d",
-                "bordercolor": "#009CEA",
-                "font": {"color": "#e6edf3"},
-            },
-            "colorway": [
-                "#009CEA", "#f0b429", "#2ecc71",
-                "#e74c3c", "#9b59b6", "#1abc9c", "#e67e22",
-            ],
-        },
-    },
-    "light": {
-        "backgroundColor": "#ffffff",
-        "secondaryBackgroundColor": "#f0f2f6",
-        "textColor": "#262730",
-        "chart": {
-            "paper_bgcolor": "#ffffff",
-            "plot_bgcolor": "#f0f2f6",
-            "font": {"color": "#262730", "family": "Inter, sans-serif", "size": 12},
-            "xaxis": {
-                "gridcolor": "#dde1e9",
-                "linecolor": "#c4c9d4",
-                "zerolinecolor": "#dde1e9",
-            },
-            "yaxis": {
-                "gridcolor": "#dde1e9",
-                "linecolor": "#c4c9d4",
-                "zerolinecolor": "#dde1e9",
-            },
-            "legend": {"bgcolor": "#ffffff", "bordercolor": "#c4c9d4", "borderwidth": 1},
-            "hoverlabel": {
-                "bgcolor": "#f0f2f6",
-                "bordercolor": "#009CEA",
-                "font": {"color": "#262730"},
-            },
-            "colorway": [
-                "#007bbf", "#c8920a", "#1d8348",
-                "#c0392b", "#7d3c98", "#117a65", "#b7510a",
-            ],
-        },
-    },
-}
-
 
 def get_theme() -> str:
     return st.session_state.get("theme", "dark")
@@ -75,21 +12,25 @@ def render_theme_toggle():
     label = "☀️ Light mode" if theme == "dark" else "🌙 Dark mode"
     if st.button(label, key="theme_toggle_btn", use_container_width=True):
         st.session_state["theme"] = "light" if theme == "dark" else "dark"
+        st.cache_data.clear()
         st.rerun()
 
 
-def apply_theme_css():
-    """Inject CSS overrides based on current theme selection."""
+def apply_theme_css() -> None:
+    """Inject full CSS overrides for current theme."""
     theme = get_theme()
-    cfg = THEMES[theme]
-    bg = cfg["backgroundColor"]
-    sbg = cfg["secondaryBackgroundColor"]
-    tc = cfg["textColor"]
+    is_dark = theme == "dark"
 
-    st.markdown(
-        f"""
+    bg      = "#0d1117" if is_dark else "#ffffff"
+    sbg     = "#161b22" if is_dark else "#f0f2f6"
+    tc      = "#e6edf3" if is_dark else "#1c2128"
+    border  = "#30363d" if is_dark else "#d0d7de"
+    primary = "#009CEA"
+    inp_bg  = "#21262d" if is_dark else "#f6f8fa"
+
+    st.markdown(f"""
 <style>
-/* Main backgrounds */
+/* ── Backgrounds ─────────────────────────────────────── */
 .stApp, .stApp > header {{
     background-color: {bg} !important;
 }}
@@ -99,7 +40,8 @@ def apply_theme_css():
 section[data-testid="stSidebar"] > div {{
     background-color: {sbg} !important;
 }}
-/* Text */
+
+/* ── Text ────────────────────────────────────────────── */
 body, p, span, label, div, h1, h2, h3, h4, h5, h6,
 .stMarkdown, .stMarkdown p,
 div[data-testid="stMetricValue"],
@@ -108,76 +50,227 @@ div[data-testid="stMetricDelta"],
 .stCaption {{
     color: {tc} !important;
 }}
-/* Sidebar text */
 section[data-testid="stSidebar"] * {{
     color: {tc} !important;
 }}
-/* Inputs */
+
+/* ── Inputs ──────────────────────────────────────────── */
 .stTextInput input, .stNumberInput input, .stDateInput input,
 .stSelectbox select {{
-    background-color: {sbg} !important;
+    background-color: {inp_bg} !important;
     color: {tc} !important;
-    border-color: #555 !important;
+    border-color: {border} !important;
 }}
-/* Dataframes / tables */
-.stDataFrame, .stDataFrame * {{
-    background-color: {sbg} !important;
+
+/* ── Dataframes / tables ─────────────────────────────── */
+[data-testid="stDataFrame"],
+[data-testid="stDataFrame"] * {{
     color: {tc} !important;
 }}
-/* Divider */
+[data-testid="stDataFrame"] .dvn-scroller {{
+    background-color: {sbg} !important;
+}}
+
+/* ── Divider ─────────────────────────────────────────── */
 hr {{
-    border-color: {'#30363d' if theme == 'dark' else '#c4c9d4'} !important;
+    border-color: {border} !important;
+}}
+
+/* ── Expanders ───────────────────────────────────────── */
+.streamlit-expanderHeader,
+[data-testid="stExpander"] > div:first-child {{
+    background-color: {sbg} !important;
+    color: {tc} !important;
+    border: 1px solid {border} !important;
+    border-radius: 6px !important;
+}}
+[data-testid="stExpander"] {{
+    background-color: {sbg} !important;
+    border: 1px solid {border} !important;
+}}
+[data-testid="stExpander"] * {{
+    color: {tc} !important;
+}}
+
+/* ── Alert / info / warning / error boxes ────────────── */
+[data-testid="stAlert"] {{
+    background-color: {sbg} !important;
+    color: {tc} !important;
+}}
+[data-testid="stAlert"] p,
+[data-testid="stAlert"] div {{
+    color: {tc} !important;
+}}
+
+/* ── Tabs ────────────────────────────────────────────── */
+button[data-baseweb="tab"] {{
+    color: {tc} !important;
+    background-color: transparent !important;
+}}
+button[data-baseweb="tab"][aria-selected="true"] {{
+    color: {primary} !important;
+    border-bottom: 2px solid {primary} !important;
+}}
+
+/* ── Radio buttons ───────────────────────────────────── */
+[data-testid="stRadio"] label {{
+    color: {tc} !important;
+}}
+
+/* ── Sliders ─────────────────────────────────────────── */
+[data-testid="stSlider"] label,
+[data-testid="stSlider"] p {{
+    color: {tc} !important;
+}}
+
+/* ── File uploader ───────────────────────────────────── */
+[data-testid="stFileUploader"] {{
+    background-color: {sbg} !important;
+    border: 1px dashed {border} !important;
+    color: {tc} !important;
+}}
+[data-testid="stFileUploader"] * {{
+    color: {tc} !important;
+}}
+
+/* ── Select sliders ──────────────────────────────────── */
+[data-testid="stSelectSlider"] label,
+[data-testid="stSelectSlider"] p,
+[data-testid="stSelectSlider"] span {{
+    color: {tc} !important;
+}}
+
+/* ── Progress bar label ──────────────────────────────── */
+[data-testid="stProgress"] p {{
+    color: {tc} !important;
 }}
 </style>
-""",
-        unsafe_allow_html=True,
-    )
+""", unsafe_allow_html=True)
 
 
 def get_chart_layout() -> dict:
-    """Return Plotly layout dict for the current theme."""
-    return dict(THEMES[get_theme()]["chart"])
+    """Return Plotly layout dict for the current theme with full font/color coverage."""
+    is_dark = get_theme() == "dark"
+    tc      = "#e6edf3" if is_dark else "#1c2128"
+    grid    = "#21262d" if is_dark else "#e5e7eb"
+    line    = "#30363d" if is_dark else "#d0d7de"
+    hover_bg = "#21262d" if is_dark else "#ffffff"
+
+    axis_style = dict(
+        gridcolor=grid,
+        linecolor=line,
+        zerolinecolor=grid,
+        tickfont=dict(color=tc),
+        title=dict(font=dict(color=tc)),
+    )
+
+    return {
+        "paper_bgcolor": "#0d1117" if is_dark else "#ffffff",
+        "plot_bgcolor":  "#161b22" if is_dark else "#f6f8fa",
+        "font": dict(color=tc, family="Inter, sans-serif", size=12),
+        "title": dict(font=dict(color=tc, size=15)),
+        "legend": dict(
+            bgcolor="#161b22" if is_dark else "#f0f2f5",
+            bordercolor=line,
+            borderwidth=1,
+            font=dict(color=tc),
+        ),
+        "xaxis": dict(**axis_style),
+        "yaxis": dict(**axis_style),
+        "hoverlabel": dict(
+            bgcolor=hover_bg,
+            bordercolor="#009CEA",
+            font=dict(color=tc),
+        ),
+        "colorway": [
+            "#009CEA", "#f0b429", "#2ecc71",
+            "#e74c3c", "#9b59b6", "#1abc9c", "#e67e22",
+        ],
+    }
 
 
-def add_copy_button(fig_key: str, label: str = "📋 Copy chart") -> None:
-    """Render a button that copies the Plotly chart (by key) to clipboard as PNG."""
-    js = f"""
-<button onclick="copyPlotlyChart()" style="
-    padding:4px 12px; font-size:12px; cursor:pointer;
-    border:1px solid #555; border-radius:4px;
-    background:transparent; color:inherit; margin:2px 0 6px 0;">
-  {label}
-</button>
-<span id="copy_status_{fig_key}" style="font-size:11px; margin-left:8px; color:#2ecc71;"></span>
-<script>
-function copyPlotlyChart() {{
-  var divs = document.querySelectorAll('.js-plotly-plot');
-  if (!divs.length) {{ return; }}
-  var target = divs[divs.length - 1];
-  Plotly.toImage(target, {{format:'png', width:1200, height:500}}).then(function(dataUrl) {{
-    fetch(dataUrl).then(r => r.blob()).then(blob => {{
-      navigator.clipboard.write([new ClipboardItem({{'image/png': blob}})]).then(function() {{
-        var s = document.getElementById('copy_status_{fig_key}');
-        if (s) {{ s.textContent = 'Copied!'; setTimeout(() => s.textContent='', 2000); }}
-      }}).catch(function() {{
-        var a = document.createElement('a');
-        a.href = dataUrl; a.download = '{fig_key}.png'; a.click();
-      }});
-    }});
-  }});
-}}
-</script>
-"""
-    components.html(js, height=40)
+def get_yaxis2_style() -> dict:
+    """Return theme-aware yaxis2 dict for dual-axis charts."""
+    is_dark = get_theme() == "dark"
+    tc      = "#e6edf3" if is_dark else "#1c2128"
+    grid    = "#21262d" if is_dark else "#e5e7eb"
+    return dict(
+        tickfont=dict(color=tc),
+        title=dict(font=dict(color=tc)),
+        gridcolor=grid,
+    )
 
 
 def get_rangeselector_style() -> dict:
     """Return Plotly rangeselector kwargs styled for the current theme."""
-    cfg = THEMES[get_theme()]
+    is_dark = get_theme() == "dark"
     return dict(
-        bgcolor=cfg["secondaryBackgroundColor"],
+        bgcolor="#161b22" if is_dark else "#f0f2f6",
         activecolor="#009CEA",
-        font=dict(color=cfg["textColor"], size=11),
+        font=dict(color="#e6edf3" if is_dark else "#1c2128", size=11),
         borderwidth=1,
         bordercolor="#009CEA",
     )
+
+
+def add_copy_button(fig_key: str, label: str = "Copy chart") -> None:
+    """PNG copy-to-clipboard via Plotly.toImage. Falls back to download with message."""
+    components.html(f"""
+<div style="margin:6px 0 10px 0;">
+  <button id="cb_{fig_key}"
+    style="background:#009CEA;color:#fff;border:none;
+           padding:5px 14px;border-radius:5px;cursor:pointer;
+           font-size:13px;font-family:Inter,sans-serif;">
+    📋 {label}
+  </button>
+  <span id="msg_{fig_key}"
+    style="margin-left:10px;font-size:12px;font-family:Inter,sans-serif;">
+  </span>
+</div>
+<script>
+(function(){{
+  const btn = document.getElementById('cb_{fig_key}');
+  const msg = document.getElementById('msg_{fig_key}');
+
+  btn.addEventListener('click', async () => {{
+    btn.disabled = true;
+    btn.textContent = '⏳ Copying...';
+    try {{
+      const parent = window.parent || window;
+      const plots  = parent.document.querySelectorAll('.js-plotly-plot');
+      if (!plots || !plots.length) throw new Error('No chart found on page');
+      const plotDiv = plots[plots.length - 1];
+      const Plotly  = parent.Plotly;
+
+      const dataUrl = await Plotly.toImage(plotDiv, {{
+        format: 'png',
+        width:  plotDiv.offsetWidth  || 1400,
+        height: plotDiv.offsetHeight || 600,
+        scale:  2,
+      }});
+
+      const res  = await fetch(dataUrl);
+      const blob = await res.blob();
+
+      if (navigator.clipboard && navigator.clipboard.write) {{
+        await navigator.clipboard.write([new ClipboardItem({{'image/png': blob}})]);
+        msg.style.color = '#2ecc71';
+        msg.textContent = '✅ Copied!';
+      }} else {{
+        const a = document.createElement('a');
+        a.href = dataUrl; a.download = '{fig_key}.png'; a.click();
+        msg.style.color = '#f0b429';
+        msg.textContent = '⬇️ Downloaded (clipboard needs HTTPS)';
+      }}
+    }} catch(err) {{
+      msg.style.color = '#e74c3c';
+      msg.textContent = '❌ ' + err.message;
+    }} finally {{
+      btn.disabled = false;
+      btn.textContent = '📋 {label}';
+      setTimeout(() => {{ msg.textContent = ''; }}, 3500);
+    }}
+  }});
+}})();
+</script>
+""", height=48, scrolling=False)

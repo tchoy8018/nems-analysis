@@ -265,7 +265,7 @@ fig_profile.update_layout(**cl)
 
 # Fill green where USEP > daily avg (discharge zone), red where < (charge zone)
 fig_profile.add_trace(go.Scatter(
-    x=period_avg["period"], y=[avg_daily_usep] * 48,
+    x=period_avg["period"], y=[avg_daily_usep] * len(period_avg),
     mode="lines", name=f"Daily avg (S${avg_daily_usep:.2f})",
     line=dict(color="#f0b429", width=1.5, dash="dot"),
     hoverinfo="skip",
@@ -311,21 +311,43 @@ else:
     col_ch, col_dis = st.columns(2)
     with col_ch:
         st.markdown("**Best 6 charge periods** (lowest avg USEP)")
-        best_charge = period_avg.nsmallest(6, "avg_usep").sort_values("avg_usep").copy()
-        best_charge["premium"] = (best_charge["avg_usep"] - avg_daily_usep).round(2)
-        best_charge_disp = best_charge[["period", "time_label", "avg_usep", "premium"]].copy()
-        best_charge_disp.columns = ["Period", "Time (SGT)", "Avg USEP", "vs Daily Avg"]
-        best_charge_disp["Avg USEP"] = best_charge_disp["Avg USEP"].round(2)
-        st.dataframe(best_charge_disp, use_container_width=True, hide_index=True)
+        charge_list = period_avg.nsmallest(6, "avg_usep").sort_values("avg_usep")
+        if charge_list.empty:
+            st.info("No charge period data for selected range.")
+        else:
+            charge_df = charge_list.copy()
+            charge_df["discount_vs_avg"] = (charge_df["avg_usep"] - avg_daily_usep).round(2)
+            charge_df = charge_df.rename(columns={
+                "period": "Period",
+                "time_label": "Time (SGT)",
+                "avg_usep": "Avg USEP (S$/MWh)",
+                "discount_vs_avg": "vs Daily Avg",
+            })
+            charge_df["Avg USEP (S$/MWh)"] = charge_df["Avg USEP (S$/MWh)"].round(2)
+            st.dataframe(
+                charge_df[["Period", "Time (SGT)", "Avg USEP (S$/MWh)", "vs Daily Avg"]],
+                use_container_width=True, hide_index=True,
+            )
 
     with col_dis:
         st.markdown("**Best 6 discharge periods** (highest avg USEP)")
-        best_discharge = period_avg.nlargest(6, "avg_usep").sort_values("avg_usep", ascending=False).copy()
-        best_discharge["premium"] = (best_discharge["avg_usep"] - avg_daily_usep).round(2)
-        best_discharge_disp = best_discharge[["period", "time_label", "avg_usep", "premium"]].copy()
-        best_discharge_disp.columns = ["Period", "Time (SGT)", "Avg USEP", "Premium vs Daily Avg"]
-        best_discharge_disp["Avg USEP"] = best_discharge_disp["Avg USEP"].round(2)
-        st.dataframe(best_discharge_disp, use_container_width=True, hide_index=True)
+        discharge_list = period_avg.nlargest(6, "avg_usep").sort_values("avg_usep", ascending=False)
+        if discharge_list.empty:
+            st.info("No discharge period data for selected range.")
+        else:
+            discharge_df = discharge_list.copy()
+            discharge_df["premium_vs_avg"] = (discharge_df["avg_usep"] - avg_daily_usep).round(2)
+            discharge_df = discharge_df.rename(columns={
+                "period": "Period",
+                "time_label": "Time (SGT)",
+                "avg_usep": "Avg USEP (S$/MWh)",
+                "premium_vs_avg": "Premium vs Daily Avg",
+            })
+            discharge_df["Avg USEP (S$/MWh)"] = discharge_df["Avg USEP (S$/MWh)"].round(2)
+            st.dataframe(
+                discharge_df[["Period", "Time (SGT)", "Avg USEP (S$/MWh)", "Premium vs Daily Avg"]],
+                use_container_width=True, hide_index=True,
+            )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 3 — Dispatch Optimization
