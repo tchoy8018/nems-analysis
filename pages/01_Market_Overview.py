@@ -306,22 +306,33 @@ if uploaded is not None:
         tmp.write(uploaded.getvalue())
         tmp_path = Path(tmp.name)
 
-    with st.spinner("Importing…"):
-        result = import_csv_to_db(tmp_path, engine)
+    try:
+        with st.spinner("Importing…"):
+            result = import_csv_to_db(tmp_path, engine)
         tmp_path.unlink(missing_ok=True)
 
-    if result["errors"]:
-        st.error("Import failed: " + "; ".join(result["errors"]))
-    else:
-        n  = result["rows_imported"]
-        sk = result["rows_skipped"]
+        errors = result.get("errors") or []
+        n  = result.get("rows_imported") or 0
+        sk = result.get("rows_skipped")  or 0
         dr = result.get("date_range")
-        st.success(
-            f"✅ {n:,} new rows added"
-            + (f", {sk:,} duplicates skipped" if sk else "")
-            + (f"  —  {dr['min']} → {dr['max']}" if dr else "")
-        )
-        load_usep_range.clear()
-        load_heatmap_data.clear()
-        load_db_status.clear()
-        st.rerun()
+
+        if errors:
+            st.error("Import errors: " + "; ".join(errors[:3]))
+        elif n == 0:
+            st.info(
+                f"No new rows added — all {sk:,} periods already exist in the database "
+                "(duplicates skipped). Upload a file with newer dates."
+            )
+        else:
+            st.success(
+                f"✅ {n:,} new rows added"
+                + (f", {sk:,} duplicates skipped" if sk else "")
+                + (f"  —  {dr['min']} → {dr['max']}" if dr else "")
+            )
+            load_usep_range.clear()
+            load_heatmap_data.clear()
+            load_db_status.clear()
+            st.rerun()
+    except Exception as e:
+        tmp_path.unlink(missing_ok=True)
+        st.error(f"Upload failed: {e}")

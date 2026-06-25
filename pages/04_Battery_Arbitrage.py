@@ -303,24 +303,27 @@ fig_profile.update_layout(
 st.plotly_chart(fig_profile, use_container_width=True)
 
 # Best charge / discharge windows
-col_ch, col_dis = st.columns(2)
-with col_ch:
-    st.markdown("**Best 6 charge periods** (lowest avg USEP)")
-    best_charge = period_avg.nsmallest(6, "avg_usep").sort_values("avg_usep").copy()
-    best_charge["premium"] = (best_charge["avg_usep"] - avg_daily_usep).round(2)
-    best_charge_disp = best_charge[["period", "time_label", "avg_usep", "premium"]].copy()
-    best_charge_disp.columns = ["Period", "Time (SGT)", "Avg USEP", "vs Daily Avg"]
-    best_charge_disp["Avg USEP"] = best_charge_disp["Avg USEP"].round(2)
-    st.dataframe(best_charge_disp, use_container_width=True, hide_index=True)
+if period_avg.empty:
+    st.info("Insufficient data to compute charge/discharge windows for the selected period.")
+else:
+    col_ch, col_dis = st.columns(2)
+    with col_ch:
+        st.markdown("**Best 6 charge periods** (lowest avg USEP)")
+        best_charge = period_avg.nsmallest(6, "avg_usep").sort_values("avg_usep").copy()
+        best_charge["premium"] = (best_charge["avg_usep"] - avg_daily_usep).round(2)
+        best_charge_disp = best_charge[["period", "time_label", "avg_usep", "premium"]].copy()
+        best_charge_disp.columns = ["Period", "Time (SGT)", "Avg USEP", "vs Daily Avg"]
+        best_charge_disp["Avg USEP"] = best_charge_disp["Avg USEP"].round(2)
+        st.dataframe(best_charge_disp, use_container_width=True, hide_index=True)
 
-with col_dis:
-    st.markdown("**Best 6 discharge periods** (highest avg USEP)")
-    best_discharge = period_avg.nlargest(6, "avg_usep").sort_values("avg_usep", ascending=False).copy()
-    best_discharge["premium"] = (best_discharge["avg_usep"] - avg_daily_usep).round(2)
-    best_discharge_disp = best_discharge[["period", "time_label", "avg_usep", "premium"]].copy()
-    best_discharge_disp.columns = ["Period", "Time (SGT)", "Avg USEP", "Premium vs Daily Avg"]
-    best_discharge_disp["Avg USEP"] = best_discharge_disp["Avg USEP"].round(2)
-    st.dataframe(best_discharge_disp, use_container_width=True, hide_index=True)
+    with col_dis:
+        st.markdown("**Best 6 discharge periods** (highest avg USEP)")
+        best_discharge = period_avg.nlargest(6, "avg_usep").sort_values("avg_usep", ascending=False).copy()
+        best_discharge["premium"] = (best_discharge["avg_usep"] - avg_daily_usep).round(2)
+        best_discharge_disp = best_discharge[["period", "time_label", "avg_usep", "premium"]].copy()
+        best_discharge_disp.columns = ["Period", "Time (SGT)", "Avg USEP", "Premium vs Daily Avg"]
+        best_discharge_disp["Avg USEP"] = best_discharge_disp["Avg USEP"].round(2)
+        st.dataframe(best_discharge_disp, use_container_width=True, hide_index=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 3 — Dispatch Optimization
@@ -539,24 +542,27 @@ for p in plf_scenarios:
 
 sens_df = pd.DataFrame(sens_rows).set_index("PLF")
 
-# Colour the cells
-col_min = sens_df.values.min()
-col_max = sens_df.values.max()
+if sens_df.empty:
+    st.info("Sensitivity data unavailable — no daily upside computed for the selected period.")
+else:
+    # Colour the cells
+    col_min = float(sens_df.values.min())
+    col_max = float(sens_df.values.max())
 
-def _cell_style(val):
-    if col_max == col_min:
-        pct = 0.5
-    else:
-        pct = (val - col_min) / (col_max - col_min)
-    r = int(255 * (1 - pct))
-    g = int(180 + 75 * pct)
-    b = int(100 * (1 - pct))
-    return f"background-color: rgb({r},{g},{b}); color: #000"
+    def _cell_style(val):
+        if col_max == col_min:
+            pct = 0.5
+        else:
+            pct = (val - col_min) / (col_max - col_min)
+        r = int(255 * (1 - pct))
+        g = int(180 + 75 * pct)
+        b = int(100 * (1 - pct))
+        return f"background-color: rgb({r},{g},{b}); color: #000"
 
-st.dataframe(
-    sens_df.style.applymap(_cell_style).format("S${:.1f}M"),
-    use_container_width=True,
-)
+    st.dataframe(
+        sens_df.style.map(_cell_style).format("S${:.1f}M"),
+        use_container_width=True,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 st.divider()

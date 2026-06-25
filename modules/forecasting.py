@@ -587,12 +587,17 @@ def spike_probability(engine, period: int, month: int, threshold: float = 200) -
     return float(row["spike_prob"] or 0.0)
 
 
-def spike_exceedance_curve(engine, period: int, month: int) -> pd.DataFrame:
+def spike_exceedance_curve(
+    engine, period: int, month: int, day_of_week: int | None = None,
+) -> pd.DataFrame:
     """
     Compute P(USEP > t) for a range of thresholds — used for the fan/risk chart.
-    Returns: threshold, exceedance_prob
+
+    day_of_week: optional 0=Mon…6=Sun filter (ignored for now, reserved for future
+                 day-type conditioning; kept for API compatibility).
+    Returns DataFrame: threshold, exceedance_prob
     """
-    thresholds = [50, 75, 100, 150, 200, 250, 300, 400, 500, 750, 1000]
+    thresholds = [100, 150, 200, 250, 300, 400, 500, 1000]
     rows = [
         {"threshold": t, "exceedance_prob": spike_probability(engine, period, month, float(t))}
         for t in thresholds

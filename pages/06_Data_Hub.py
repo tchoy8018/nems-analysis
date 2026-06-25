@@ -5,6 +5,13 @@ Market Intelligence Hub — Data Hub
 import io
 from pathlib import Path
 
+
+def _fmt(val, fmt: str = ",", fallback: str = "N/A") -> str:
+    """Null-safe formatter — returns fallback string when val is None."""
+    if val is None:
+        return fallback
+    return format(val, fmt)
+
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -85,15 +92,17 @@ with col3:
     st.metric("Analyst Sources", str(len(src_rows)))
     st.caption(f"{len(src_rows)} file(s) loaded")
 with col4:
-    fa_total = fa_row["n"] if fa_row else 0
-    fa_matched = fa_row["matched"] if fa_row else 0
+    fa_total   = int(fa_row["n"]       or 0) if fa_row else 0
+    fa_matched = int(fa_row["matched"] or 0) if fa_row else 0
     st.metric("Forecast–Actual Pairs", f"{fa_matched:,} / {fa_total:,}")
 
 if model_row:
+    _rmse_str = f"{model_row[2]:.1f}" if model_row[2] is not None else "N/A"
+    _mae_str  = f"{model_row[3]:.1f}" if model_row[3] is not None else "N/A"
     st.info(
         f"**Active model:** {model_row[0]} | "
         f"Trained: {str(model_row[1])[:10]} | "
-        f"RMSE: {model_row[2]:.1f} | MAE: {model_row[3]:.1f}"
+        f"RMSE: {_rmse_str} | MAE: {_mae_str}"
     )
 
 if src_rows:
@@ -358,19 +367,23 @@ else:
 
     # KPI tiles
     k1, k2, k3, k4 = st.columns(4)
+    _wu  = latest["weighted_usd"]  if pd.notna(latest.get("weighted_usd"))  else None
+    _ws  = latest["weighted_sgd"]  if pd.notna(latest.get("weighted_sgd"))  else None
+    _lsh = latest["lng_share"]     if pd.notna(latest.get("lng_share"))     else None
+    _fl  = latest["implied_floor"] if pd.notna(latest.get("implied_floor")) else None
     k1.metric(
         "Latest Weighted Gas",
-        f"${latest['weighted_usd']:.2f}/MMBtu",
-        help=f"S${latest['weighted_sgd']:.2f}/MMBtu after FX conversion",
+        f"${_wu:.2f}/MMBtu" if _wu is not None else "N/A",
+        help=f"S${_ws:.2f}/MMBtu after FX conversion" if _ws is not None else "FX data unavailable",
     )
     k2.metric(
         "LNG Share",
-        f"{latest['lng_share']:.0f}%",
+        f"{_lsh:.0f}%" if _lsh is not None else "N/A",
         help="LNG's share of total gas volume (MT basis)",
     )
     k3.metric(
         "Implied CCGT Floor",
-        f"S${latest['implied_floor']:.0f}/MWh",
+        f"S${_fl:.0f}/MWh" if _fl is not None else "N/A",
         help="Weighted gas price × 7.5 MMBtu/MWh heat rate",
     )
     best_lag = corr_result.get("best_lag", 0)
@@ -379,7 +392,7 @@ else:
     r2_pct = f"{corr_result['regression_r2']*100:.0f}%" if corr_result.get("regression_r2") else "—"
     k4.metric(
         "Gas→USEP Correlation",
-        f"r = {best_r:.2f}" if best_r else "—",
+        f"r = {best_r:.2f}" if best_r is not None else "—",
         help=f"Pearson r at lag {best_lag}m. R² = {r2_pct}",
     )
 
