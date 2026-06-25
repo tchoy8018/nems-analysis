@@ -256,6 +256,79 @@ def _get_model_rmse(engine, model_name: str) -> float | None:
         return None
 
 
+def _save_predictions(engine, model_name: str, df: pd.DataFrame) -> None:
+    """Persist forecast output to prediction_log (upsert on conflict)."""
+    if engine is None or df.empty:
+        return
+    now = datetime.now(timezone.utc)
+    try:
+        with engine.begin() as conn:
+            for _, row in df.iterrows():
+                conn.execute(text("""
+                    INSERT INTO prediction_log
+                        (model_name, predicted_at, forecast_date, period,
+                         predicted_usep, spike_prob)
+                    VALUES (:mn, :pa, :fd, :per, :pu, :sp)
+                    ON CONFLICT(model_name, forecast_date, period)
+                    DO UPDATE SET predicted_usep=:pu, spike_prob=:sp, predicted_at=:pa
+                """), {
+                    "mn":  model_name,
+                    "pa":  now,
+                    "fd":  row["dt"].date() if hasattr(row["dt"], "date") else row["dt"],
+                    "per": int(row["period"]),
+                    "pu":  float(row["predicted_usep"]),
+                    "sp":  float(row.get("spike_prob", 0) or 0),
+                })
+    except Exception:
+        pass
+
+
+def _save_backtest_run(engine, model_name: str, test_days: int,
+                       metrics: dict, n_periods: int) -> None:
+    """Save a backtest run summary to backtest_runs."""
+    if engine is None:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO backtest_runs
+                    (run_at, model_name, test_days, rmse, mae, mape, n_periods)
+                VALUES (datetime('now'), :mn, :td, :rmse, :mae, :mape, :np)
+            """), {
+                "mn":   model_name,
+                "td":   test_days,
+                "rmse": metrics.get("rmse"),
+                "mae":  metrics.get("mae"),
+                "mape": metrics.get("mape"),
+                "np":   n_periods,
+            })
+    except Exception:
+        pass
+
+
+def _record_evolution(engine, model_name: str, metrics: dict,
+                      training_rows: int, notes: str = "") -> None:
+    """Append a row to model_evolution for RMSE trend tracking."""
+    if engine is None:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO model_evolution
+                    (model_name, trained_at, rmse, mae, mape, training_rows, notes)
+                VALUES (:mn, datetime('now'), :rmse, :mae, :mape, :tr, :notes)
+            """), {
+                "mn":    model_name,
+                "rmse":  metrics.get("rmse"),
+                "mae":   metrics.get("mae"),
+                "mape":  metrics.get("mape"),
+                "tr":    training_rows,
+                "notes": notes,
+            })
+    except Exception:
+        pass
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. XGBoost
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,6 +389,8 @@ def train_xgboost(
     path = str(MODELS_DIR / "xgboost_model.joblib")
     joblib.dump({"model": model, "features": avail}, path)
     _register_model(engine, "xgboost", m, len(train), path)
+    _record_evolution(engine, "xgboost", m, len(train),
+                      f"outlier_treatment={outlier_treatment}")
 
     # Print comparison table row
     before_str = f"{baseline_rmse:.2f}" if baseline_rmse else "—"
@@ -421,6 +496,8 @@ def train_prophet(
         "intraday_profile": intraday_profile,
     }, path)
     _register_model(engine, "prophet", m, len(train_day), path)
+    _record_evolution(engine, "prophet", m, len(train_day),
+                      f"outlier_treatment={outlier_treatment}")
 
     before_str = f"{baseline_rmse:.2f}" if baseline_rmse else "—"
     improvement = ""
@@ -672,7 +749,9 @@ def predict(model_name: str, engine, n_periods: int = 48,
                 "upper_bound":    round(yhat + 1.5 * rmse_ci, 2),
                 "spike_prob":     round(sp, 4),
             })
-        return pd.DataFrame(results)
+        out = pd.DataFrame(results)
+        _save_predictions(engine, model_name, out)
+        return out
 
     elif model_name == "prophet":
         payload          = joblib.load(MODELS_DIR / "prophet_model.joblib")
@@ -727,7 +806,9 @@ def predict(model_name: str, engine, n_periods: int = 48,
                 "upper_bound":    round(upper, 2),
                 "spike_prob":     round(sp, 4),
             })
-        return pd.DataFrame(results)
+        out = pd.DataFrame(results)
+        _save_predictions(engine, model_name, out)
+        return out
 
     else:
         raise ValueError(f"Unknown model: {model_name!r}")
@@ -792,6 +873,7 @@ def backtest_walk_forward(
     df: pd.DataFrame,
     test_days: int = 90,
     progress_callback: Callable[[float], None] | None = None,
+    engine=None,
 ) -> pd.DataFrame:
     """
     Walk-forward backtest using lightweight XGBoost (n_estimators=200).
@@ -847,7 +929,11 @@ def backtest_walk_forward(
         if progress_callback:
             progress_callback((i + 1) / n_total)
 
-    return pd.DataFrame(results)
+    bt_df = pd.DataFrame(results)
+    if engine is not None and not bt_df.empty:
+        m = _metrics(bt_df["actual"].values, bt_df["predicted"].values)
+        _save_backtest_run(engine, "xgboost_backtest", test_days, m, len(bt_df))
+    return bt_df
 
 
 # ─────────────────────────────────────────────────────────────────────────────

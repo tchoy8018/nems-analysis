@@ -26,7 +26,7 @@ from modules.ingestion import (
     ingest_gas_prices,
 )
 from modules.analysis import analyst_vs_actuals, vintage_comparison
-from modules.theme import apply_theme_css, get_chart_layout, get_rangeselector_style, render_theme_toggle
+from modules.theme import add_copy_button, apply_theme_css, get_chart_layout, get_rangeselector_style, render_theme_toggle
 
 st.set_page_config(page_title="Data Hub", layout="wide", page_icon="🗄️")
 
@@ -281,7 +281,8 @@ else:
         ),
         yaxis=dict(title="RMSE ($/MWh)"),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="dh_accuracy")
+    add_copy_button("dh_accuracy")
 
     # Per-bucket breakdown
     with engine.connect() as conn:

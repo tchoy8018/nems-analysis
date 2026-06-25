@@ -14,6 +14,7 @@ from db import get_engine, setup_database
 from modules.analysis import spike_analysis
 from modules.ingestion import import_csv_to_db
 from modules.theme import (
+    add_copy_button,
     apply_theme_css, get_chart_layout, get_rangeselector_style,
     render_theme_toggle,
 )
@@ -225,7 +226,8 @@ fig_ts.update_layout(
         **cl.get("xaxis", {}),
     ),
 )
-st.plotly_chart(fig_ts, use_container_width=True)
+st.plotly_chart(fig_ts, use_container_width=True, key="usep_ts")
+add_copy_button("usep_ts")
 
 st.divider()
 

@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from db import get_engine, setup_database
-from modules.theme import apply_theme_css, get_chart_layout, render_theme_toggle
+from modules.theme import apply_theme_css, add_copy_button, get_chart_layout, render_theme_toggle
 from config import COLOR_USEP, COLOR_SPIKE
 
 
@@ -17,6 +17,16 @@ def _get_engine():
     engine = get_engine()
     setup_database(engine)
     return engine
+
+
+@st.cache_data(ttl=86400)
+def _check_drift_daily(_engine) -> dict:
+    """Check XGBoost drift once per day; returns {drift_detected, recent_rmse, baseline_rmse}."""
+    try:
+        from modules.forecasting import check_model_drift
+        return check_model_drift(_engine, "xgboost", window_days=30)
+    except Exception:
+        return {"drift_detected": False, "recent_rmse": None, "baseline_rmse": None}
 
 
 @st.cache_data(ttl=300)
@@ -102,6 +112,15 @@ def main():
             st.warning("No data loaded yet.")
 
         st.divider()
+        drift = _check_drift_daily(engine)
+        if drift.get("drift_detected"):
+            st.warning(
+                f"⚠️ **Model drift detected**  \n"
+                f"Recent RMSE: S${drift['recent_rmse']:.1f}/MWh  \n"
+                f"Baseline: S${drift['baseline_rmse']:.1f}/MWh  \n"
+                "Go to Forecast → Retrain All Models"
+            )
+
         st.page_link("app.py", label="Home", icon="🏠")
         st.page_link("pages/01_Market_Overview.py", label="Market Overview", icon="📊")
         st.page_link("pages/02_Duck_Curve.py", label="Duck Curve", icon="🦆")
@@ -187,7 +206,8 @@ def main():
         showlegend=True,
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="home_usep")
+    add_copy_button("home_usep")
 
 
 if __name__ == "__main__":

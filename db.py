@@ -140,6 +140,43 @@ gas_prices = Table(
     UniqueConstraint("price_date", name="uq_gas_price_date"),
 )
 
+# NEW — Phase 5 persistent learning
+backtest_runs = Table(
+    "backtest_runs", metadata,
+    Column("id",          Integer,  primary_key=True, autoincrement=True),
+    Column("run_at",      DateTime, nullable=False),
+    Column("model_name",  Text,     nullable=False),
+    Column("test_days",   Integer),
+    Column("rmse",        Float),
+    Column("mae",         Float),
+    Column("mape",        Float),
+    Column("n_periods",   Integer),
+)
+
+prediction_log = Table(
+    "prediction_log", metadata,
+    Column("id",            Integer,  primary_key=True, autoincrement=True),
+    Column("model_name",    Text,     nullable=False),
+    Column("predicted_at",  DateTime, nullable=False),
+    Column("forecast_date", Date,     nullable=False),
+    Column("period",        Integer,  nullable=False),
+    Column("predicted_usep", Float),
+    Column("spike_prob",    Float),
+    UniqueConstraint("model_name", "forecast_date", "period", name="uq_prediction_log"),
+)
+
+model_evolution = Table(
+    "model_evolution", metadata,
+    Column("id",            Integer,  primary_key=True, autoincrement=True),
+    Column("model_name",    Text,     nullable=False),
+    Column("trained_at",    DateTime, nullable=False),
+    Column("rmse",          Float),
+    Column("mae",           Float),
+    Column("mape",          Float),
+    Column("training_rows", Integer),
+    Column("notes",         Text),
+)
+
 # Indexes
 Index("idx_nems_date",        nems_prices.c.date)
 Index("idx_nems_period",      nems_prices.c.period)
@@ -148,6 +185,9 @@ Index("idx_forecast_source",  forecast_data.c.source_id)
 Index("idx_forecast_date",    forecast_data.c.date)
 Index("idx_fa_model_date",    forecast_actuals.c.model_name, forecast_actuals.c.forecast_date)
 Index("idx_gas_date",         gas_prices.c.price_date)
+Index("idx_bt_model",         backtest_runs.c.model_name)
+Index("idx_plog_model_date",  prediction_log.c.model_name, prediction_log.c.forecast_date)
+Index("idx_evo_model",        model_evolution.c.model_name)
 
 
 def _add_column_safe(conn, table: str, column: str, definition: str) -> None:
@@ -190,3 +230,6 @@ def setup_database(engine) -> None:
         ]
         for col, defn in new_gas_cols:
             _add_column_safe(conn, "gas_prices", col, defn)
+
+        # Phase 5 — backtest_runs, prediction_log, model_evolution are created
+        # via metadata.create_all above; no ALTER TABLE needed for new tables

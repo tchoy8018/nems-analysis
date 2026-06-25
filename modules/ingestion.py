@@ -605,6 +605,50 @@ def ingest_analyst_forecast(
     return {"rows_imported": inserted, "rows_skipped": skipped, "errors": errors, "source_id": source_id}
 
 
+def _backfill_actuals(engine) -> int:
+    """Fill actual_usep + error columns in prediction_log from nems_prices for past predictions."""
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT pl.id, pl.forecast_date, pl.period, pl.predicted_usep
+            FROM prediction_log pl
+            WHERE pl.predicted_usep IS NOT NULL
+              AND pl.forecast_date < date('now')
+              AND NOT EXISTS (
+                  SELECT 1 FROM forecast_actuals fa
+                  WHERE fa.model_name = pl.model_name
+                    AND fa.forecast_date = pl.forecast_date
+                    AND fa.period = pl.period
+              )
+        """)).fetchall()
+
+        if not rows:
+            return 0
+
+        filled = 0
+        for row_id, fdate, period, pred in rows:
+            actual_row = conn.execute(text("""
+                SELECT usep FROM nems_prices
+                WHERE date = :d AND period = :p AND usep IS NOT NULL
+                LIMIT 1
+            """), {"d": fdate, "p": period}).fetchone()
+            if actual_row:
+                actual = float(actual_row[0])
+                err = actual - float(pred)
+                conn.execute(text("""
+                    INSERT INTO forecast_actuals
+                        (model_name, forecast_date, period, predicted_usep,
+                         actual_usep, error, abs_error, forecast_horizon_periods, created_at)
+                    SELECT model_name, :fdate, :period, :pred,
+                           :actual, :err, :abserr, 0, datetime('now')
+                    FROM prediction_log WHERE id = :rid
+                    ON CONFLICT(model_name, forecast_date, period, forecast_horizon_periods)
+                    DO UPDATE SET actual_usep=:actual, error=:err, abs_error=:abserr
+                """), {"fdate": fdate, "period": period, "pred": pred,
+                       "actual": actual, "err": err, "abserr": abs(err), "rid": row_id})
+                filled += 1
+    return filled
+
+
 def ingest_and_retrain(file_path, engine, model_registry_table=None) -> dict:
     """
     Auto-learning pipeline:
@@ -656,6 +700,10 @@ def ingest_and_retrain(file_path, engine, model_registry_table=None) -> dict:
     retrain_metrics = None
 
     if file_type == "nems_prices" and rows_imported > 0:
+        try:
+            _backfill_actuals(engine)
+        except Exception as e:
+            errors.append(f"Backfill actuals failed: {e}")
         try:
             from modules.forecasting import check_model_drift, train_xgboost
             drift_info = check_model_drift(engine, "xgboost_v1", window_days=30)

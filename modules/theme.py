@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 
 THEMES = {
     "dark": {
@@ -136,6 +137,38 @@ hr {{
 def get_chart_layout() -> dict:
     """Return Plotly layout dict for the current theme."""
     return dict(THEMES[get_theme()]["chart"])
+
+
+def add_copy_button(fig_key: str, label: str = "📋 Copy chart") -> None:
+    """Render a button that copies the Plotly chart (by key) to clipboard as PNG."""
+    js = f"""
+<button onclick="copyPlotlyChart()" style="
+    padding:4px 12px; font-size:12px; cursor:pointer;
+    border:1px solid #555; border-radius:4px;
+    background:transparent; color:inherit; margin:2px 0 6px 0;">
+  {label}
+</button>
+<span id="copy_status_{fig_key}" style="font-size:11px; margin-left:8px; color:#2ecc71;"></span>
+<script>
+function copyPlotlyChart() {{
+  var divs = document.querySelectorAll('.js-plotly-plot');
+  if (!divs.length) {{ return; }}
+  var target = divs[divs.length - 1];
+  Plotly.toImage(target, {{format:'png', width:1200, height:500}}).then(function(dataUrl) {{
+    fetch(dataUrl).then(r => r.blob()).then(blob => {{
+      navigator.clipboard.write([new ClipboardItem({{'image/png': blob}})]).then(function() {{
+        var s = document.getElementById('copy_status_{fig_key}');
+        if (s) {{ s.textContent = 'Copied!'; setTimeout(() => s.textContent='', 2000); }}
+      }}).catch(function() {{
+        var a = document.createElement('a');
+        a.href = dataUrl; a.download = '{fig_key}.png'; a.click();
+      }});
+    }});
+  }});
+}}
+</script>
+"""
+    components.html(js, height=40)
 
 
 def get_rangeselector_style() -> dict:

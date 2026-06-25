@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db import get_engine, setup_database
 from modules.theme import (
+    add_copy_button,
     apply_theme_css, get_chart_layout, get_rangeselector_style,
     render_theme_toggle,
 )
@@ -300,7 +301,8 @@ fig_profile.update_layout(
     yaxis=dict(title="Avg USEP (S$/MWh)", **cl.get("yaxis", {})),
     hovermode="x unified",
 )
-st.plotly_chart(fig_profile, use_container_width=True)
+st.plotly_chart(fig_profile, use_container_width=True, key="batt_profile")
+add_copy_button("batt_profile")
 
 # Best charge / discharge windows
 if period_avg.empty:
@@ -517,7 +519,8 @@ fig_stack.update_layout(
     xaxis=dict(title="Plant Load Factor", **cl.get("xaxis", {})),
     yaxis=dict(title="Annual Revenue (S$M)", **cl.get("yaxis", {})),
 )
-st.plotly_chart(fig_stack, use_container_width=True)
+st.plotly_chart(fig_stack, use_container_width=True, key="revenue_stack")
+add_copy_button("revenue_stack")
 
 plf_df = pd.DataFrame(plf_rows)
 st.dataframe(plf_df, use_container_width=True, hide_index=True)

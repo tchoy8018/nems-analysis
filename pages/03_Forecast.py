@@ -29,6 +29,7 @@ from modules.forecasting import (
     train_xgboost,
 )
 from modules.theme import (
+    add_copy_button,
     apply_theme_css,
     get_chart_layout,
     get_rangeselector_style,
@@ -127,6 +128,86 @@ _MAPE_HELP = (
     "High MAPE at low-price periods is mathematically expected."
 )
 
+@st.cache_data(ttl=300)
+def _load_evolution(_engine):
+    from sqlalchemy import text
+    with _engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT model_name, trained_at, rmse, mae, mape, training_rows, notes
+            FROM model_evolution ORDER BY trained_at
+        """)).fetchall()
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows, columns=["model_name", "trained_at", "rmse", "mae", "mape",
+                                       "training_rows", "notes"])
+
+
+@st.cache_data(ttl=300)
+def _load_backtest_history(_engine):
+    from sqlalchemy import text
+    with _engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT run_at, model_name, test_days, rmse, mae, mape, n_periods
+            FROM backtest_runs ORDER BY run_at DESC LIMIT 20
+        """)).fetchall()
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows, columns=["run_at", "model_name", "test_days",
+                                       "rmse", "mae", "mape", "n_periods"])
+
+
+def _load_model_history(engine, cl: dict) -> None:
+    evo_df = _load_evolution(engine)
+    bt_df  = _load_backtest_history(engine)
+
+    if evo_df.empty and bt_df.empty:
+        st.info("No model history yet. Run a backtest or retrain a model to start tracking.")
+        return
+
+    col_a, col_b = st.columns(2)
+
+    with col_a:
+        st.markdown("**RMSE evolution by model**")
+        if not evo_df.empty:
+            evo_df["trained_at"] = pd.to_datetime(evo_df["trained_at"])
+            cl_base = {k: v for k, v in cl.items() if k not in ("xaxis", "yaxis")}
+            fig_evo = go.Figure()
+            fig_evo.update_layout(**cl_base)
+            colors = {"xgboost": "#009CEA", "prophet": "#f0b429", "ensemble": "#e67e22"}
+            for mn in evo_df["model_name"].unique():
+                sub = evo_df[evo_df["model_name"] == mn]
+                fig_evo.add_trace(go.Scatter(
+                    x=sub["trained_at"], y=sub["rmse"],
+                    mode="lines+markers", name=mn,
+                    line=dict(color=colors.get(mn, "#888"), width=2),
+                    hovertemplate="%{x|%Y-%m-%d}<br>RMSE: S$%{y:.2f}<extra></extra>",
+                ))
+            fig_evo.update_layout(
+                height=280,
+                xaxis=dict(title="Train date"),
+                yaxis=dict(title="RMSE (S$/MWh)"),
+            )
+            st.plotly_chart(fig_evo, use_container_width=True)
+        else:
+            st.info("No evolution data yet.")
+
+    with col_b:
+        st.markdown("**Last 10 backtest runs**")
+        if not bt_df.empty:
+            display = bt_df.head(10).copy()
+            display["rmse"]  = display["rmse"].apply(lambda v: f"S${v:.1f}" if pd.notna(v) else "N/A")
+            display["mae"]   = display["mae"].apply(lambda v: f"S${v:.1f}"  if pd.notna(v) else "N/A")
+            display["run_at"] = display["run_at"].astype(str).str[:16]
+            display = display.rename(columns={
+                "run_at": "Run", "model_name": "Model", "test_days": "Days",
+                "rmse": "RMSE", "mae": "MAE", "n_periods": "Periods",
+            })
+            st.dataframe(display[["Run", "Model", "Days", "RMSE", "MAE", "Periods"]],
+                         use_container_width=True, hide_index=True)
+        else:
+            st.info("No backtest runs saved yet.")
+
+
 # ── Page setup ──────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Forecast — NEMS", layout="wide")
 
@@ -195,12 +276,12 @@ with col_xgb:
     if xgb_ready:
         r = reg_map["xgboost"]
         st.success("✅ Ready")
-        st.caption(f"Trained: {str(r['trained_at'])[:19]}")
+        st.caption(f"Trained: {str(r.get('trained_at', ''))[:19]}")
         m1, m2, m3 = st.columns(3)
-        m1.metric("RMSE", f"{r['rmse']:.1f}", help=_RMSE_HELP)
-        m2.metric("MAE",  f"{r['mae']:.1f}",  help=_MAE_HELP)
-        m3.metric("MAPE", f"{r['mape']:.1f}%", help=_MAPE_HELP)
-        st.caption(f"Rows: {r['training_rows']:,} | outlier exclusion")
+        m1.metric("RMSE", f"S${r['rmse']:.1f}" if r.get("rmse") else "N/A", help=_RMSE_HELP)
+        m2.metric("MAE",  f"S${r['mae']:.1f}"  if r.get("mae")  else "N/A", help=_MAE_HELP)
+        m3.metric("MAPE", f"{r['mape']:.1f}%"  if r.get("mape") else "N/A", help=_MAPE_HELP)
+        st.caption(f"Rows: {r.get('training_rows', 0):,} | outlier exclusion")
     else:
         st.warning("⚠️ Not trained")
 
@@ -210,12 +291,13 @@ with col_pro:
     if pro_ready:
         r = reg_map["prophet"]
         st.success("✅ Ready")
-        st.caption(f"Trained: {str(r['trained_at'])[:19]}")
+        st.caption(f"Trained: {str(r.get('trained_at', ''))[:19]}")
         m1, m2, m3 = st.columns(3)
-        m1.metric("RMSE", f"{r['rmse']:.1f}", help=_RMSE_HELP + " Prophet RMSE is daily avg.")
-        m2.metric("MAE",  f"{r['mae']:.1f}",  help=_MAE_HELP)
-        m3.metric("MAPE", f"{r['mape']:.1f}%", help=_MAPE_HELP)
-        st.caption(f"Days: {r['training_rows']:,} | daily + intraday scaling")
+        m1.metric("RMSE", f"S${r['rmse']:.1f}" if r.get("rmse") else "N/A",
+                  help=_RMSE_HELP + " Prophet RMSE is daily avg.")
+        m2.metric("MAE",  f"S${r['mae']:.1f}"  if r.get("mae")  else "N/A", help=_MAE_HELP)
+        m3.metric("MAPE", f"{r['mape']:.1f}%"  if r.get("mape") else "N/A", help=_MAPE_HELP)
+        st.caption(f"Days: {r.get('training_rows', 0):,} | daily + intraday scaling")
     else:
         st.warning("⚠️ Not trained")
 
@@ -250,9 +332,9 @@ with col_clf:
         st.success("✅ Ready")
         st.caption(f"Trained: {str(r['trained_at'])[:19]}")
         # Stored as rmse=1-F1, mae=1-precision, mape=1-recall
-        f1_val  = round(1 - float(r["rmse"]),  3)
-        prec    = round(1 - float(r["mae"]),   3)
-        rec_val = round(1 - float(r["mape"]),  3)
+        f1_val  = round(1 - float(r["rmse"]),  3) if r.get("rmse")  is not None else 0.0
+        prec    = round(1 - float(r["mae"]),   3) if r.get("mae")   is not None else 0.0
+        rec_val = round(1 - float(r["mape"]),  3) if r.get("mape")  is not None else 0.0
         m1, m2, m3 = st.columns(3)
         m1.metric("F1",    f"{f1_val:.3f}",
                   help="Harmonic mean of precision & recall for spike detection.")
@@ -378,7 +460,8 @@ def _forecast_chart(model_choice, engine, n_periods, hist_days, cl, rs,
         yaxis=dict(title="USEP (S$/MWh)"),
         hovermode="x unified",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=f"fc_{model_choice}_{n_periods}")
+    add_copy_button(f"fc_{model_choice}_{n_periods}")
 
     # Dynamic spike alert banner
     if spike_alert_periods:
@@ -473,15 +556,15 @@ with tab_st:
             if mname == "spike_classifier":
                 perf_rows.append({
                     "Model":    mlabel,
-                    "F1":       f"{1 - r['rmse']:.3f}",
-                    "Precision": f"{1 - r['mae']:.3f}",
-                    "Recall":   f"{1 - r['mape']:.3f}",
-                    "Training rows": f"{r['training_rows']:,}",
+                    "F1":       f"{1 - r['rmse']:.3f}" if r.get("rmse") is not None else "N/A",
+                    "Precision": f"{1 - r['mae']:.3f}" if r.get("mae")  is not None else "N/A",
+                    "Recall":   f"{1 - r['mape']:.3f}" if r.get("mape") is not None else "N/A",
+                    "Training rows": f"{r.get('training_rows') or 0:,}",
                 })
             elif mname == "ensemble":
                 perf_rows.append({
                     "Model":    mlabel,
-                    "RMSE":     f"S${r['rmse']:.1f}/MWh",
+                    "RMSE":     f"S${r['rmse']:.1f}/MWh" if r.get("rmse") else "N/A",
                     "MAE":      "—",
                     "MAPE":     "—",
                     "Training rows": "—",
@@ -489,10 +572,10 @@ with tab_st:
             else:
                 perf_rows.append({
                     "Model":    mlabel,
-                    "RMSE":     f"S${r['rmse']:.1f}/MWh",
-                    "MAE":      f"S${r['mae']:.1f}/MWh",
-                    "MAPE":     f"{r['mape']:.1f}%",
-                    "Training rows": f"{r['training_rows']:,}",
+                    "RMSE":     f"S${r['rmse']:.1f}/MWh" if r.get("rmse") else "N/A",
+                    "MAE":      f"S${r['mae']:.1f}/MWh"  if r.get("mae")  else "N/A",
+                    "MAPE":     f"{r['mape']:.1f}%"       if r.get("mape") else "N/A",
+                    "Training rows": f"{r.get('training_rows') or 0:,}",
                 })
         if perf_rows:
             st.dataframe(pd.DataFrame(perf_rows), use_container_width=True, hide_index=True)
@@ -591,7 +674,8 @@ with tab_st:
                     text=f"Day {day_num}/{bt_days} — {frac*100:.0f}%",
                 )
 
-            bt_df = backtest_walk_forward(full_df, test_days=bt_days, progress_callback=_cb)
+            bt_df = backtest_walk_forward(full_df, test_days=bt_days,
+                                          progress_callback=_cb, engine=engine)
             st.session_state["backtest_df"]   = bt_df
             st.session_state["backtest_days"] = bt_days
             prog.empty()
@@ -635,7 +719,8 @@ with tab_st:
             xaxis=dict(title="Actual USEP (S$/MWh)"),
             yaxis=dict(title="Predicted USEP (S$/MWh)"),
         )
-        st.plotly_chart(fig_bt, use_container_width=True)
+        st.plotly_chart(fig_bt, use_container_width=True, key="backtest_scatter")
+        add_copy_button("backtest_scatter")
 
         # Breakdown tables side by side
         col_bucket, col_year = st.columns(2)
@@ -668,6 +753,10 @@ with tab_st:
                         "MAE (S$/MWh)":  round(float(np.mean(np.abs(sub["error"]))), 1),
                     })
                 st.dataframe(pd.DataFrame(year_rows), use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("📈 Model History")
+    _load_model_history(engine, cl)
 
 
 # ── Tab 2: Medium-term 7–14d ─────────────────────────────────────────────────

@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db import get_engine, setup_database
 from modules.analysis import duck_curve
-from modules.theme import apply_theme_css, get_chart_layout, render_theme_toggle
+from modules.theme import add_copy_button, apply_theme_css, get_chart_layout, render_theme_toggle
 from config import COLOR_DEMAND, COLOR_SOLAR, COLOR_USEP
 
 
@@ -180,7 +180,8 @@ fig_dc.update_layout(
     yaxis=dict(title="MW", **cl.get("yaxis", {})),
     hovermode="x unified", showlegend=True,
 )
-st.plotly_chart(fig_dc, use_container_width=True)
+st.plotly_chart(fig_dc, use_container_width=True, key="duck_curve")
+add_copy_button("duck_curve")
 
 st.divider()
 
