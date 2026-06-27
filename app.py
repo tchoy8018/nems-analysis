@@ -114,10 +114,12 @@ def main():
         st.divider()
         drift = _check_drift_daily(engine)
         if drift.get("drift_detected"):
+            _rr = drift.get("recent_rmse")
+            _br = drift.get("baseline_rmse")
             st.warning(
                 f"⚠️ **Model drift detected**  \n"
-                f"Recent RMSE: S${drift['recent_rmse']:.1f}/MWh  \n"
-                f"Baseline: S${drift['baseline_rmse']:.1f}/MWh  \n"
+                f"Recent RMSE: {'S$' + f'{_rr:.1f}/MWh' if _rr is not None else 'N/A'}  \n"
+                f"Baseline: {'S$' + f'{_br:.1f}/MWh' if _br is not None else 'N/A'}  \n"
                 "Go to Forecast → Retrain All Models"
             )
 

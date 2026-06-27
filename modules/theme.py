@@ -217,7 +217,7 @@ def add_copy_button(fig_key: str, label: str = "Copy chart") -> None:
     """PNG copy-to-clipboard via Plotly.toImage. Falls back to download with message."""
     components.html(f"""
 <div style="margin:6px 0 10px 0;">
-  <button id="cb_{fig_key}"
+  <button id="cb_{fig_key}" onclick="doCopy_{fig_key}()"
     style="background:#009CEA;color:#fff;border:none;
            padding:5px 14px;border-radius:5px;cursor:pointer;
            font-size:13px;font-family:Inter,sans-serif;">
@@ -228,49 +228,40 @@ def add_copy_button(fig_key: str, label: str = "Copy chart") -> None:
   </span>
 </div>
 <script>
-(function(){{
+async function doCopy_{fig_key}() {{
   const btn = document.getElementById('cb_{fig_key}');
   const msg = document.getElementById('msg_{fig_key}');
-
-  btn.addEventListener('click', async () => {{
-    btn.disabled = true;
-    btn.textContent = '⏳ Copying...';
-    try {{
-      const parent = window.parent || window;
-      const plots  = parent.document.querySelectorAll('.js-plotly-plot');
-      if (!plots || !plots.length) throw new Error('No chart found on page');
-      const plotDiv = plots[plots.length - 1];
-      const Plotly  = parent.Plotly;
-
-      const dataUrl = await Plotly.toImage(plotDiv, {{
-        format: 'png',
-        width:  plotDiv.offsetWidth  || 1400,
-        height: plotDiv.offsetHeight || 600,
-        scale:  2,
-      }});
-
-      const res  = await fetch(dataUrl);
-      const blob = await res.blob();
-
-      if (navigator.clipboard && navigator.clipboard.write) {{
-        await navigator.clipboard.write([new ClipboardItem({{'image/png': blob}})]);
-        msg.style.color = '#2ecc71';
-        msg.textContent = '✅ Copied!';
-      }} else {{
-        const a = document.createElement('a');
-        a.href = dataUrl; a.download = '{fig_key}.png'; a.click();
-        msg.style.color = '#f0b429';
-        msg.textContent = '⬇️ Downloaded (clipboard needs HTTPS)';
-      }}
-    }} catch(err) {{
-      msg.style.color = '#e74c3c';
-      msg.textContent = '❌ ' + err.message;
-    }} finally {{
-      btn.disabled = false;
-      btn.textContent = '📋 {label}';
-      setTimeout(() => {{ msg.textContent = ''; }}, 3500);
+  btn.disabled = true; btn.textContent = '⏳ Copying...';
+  try {{
+    const p      = window.parent || window;
+    const plots  = p.document.querySelectorAll('.js-plotly-plot');
+    if (!plots || !plots.length) throw new Error('No chart found on page');
+    const div    = plots[plots.length - 1];
+    const Plotly = p.Plotly;
+    const url    = await Plotly.toImage(div, {{
+      format: 'png',
+      width:  div.offsetWidth  || 1400,
+      height: div.offsetHeight || 700,
+      scale:  2,
+    }});
+    const blob = await (await fetch(url)).blob();
+    if (navigator.clipboard?.write) {{
+      await navigator.clipboard.write([new ClipboardItem({{'image/png': blob}})]);
+      msg.style.color = '#2ecc71';
+      msg.textContent = '✅ Copied!';
+    }} else {{
+      const a = document.createElement('a');
+      a.href = url; a.download = '{fig_key}.png'; a.click();
+      msg.style.color = '#f0b429';
+      msg.textContent = '⬇️ Downloaded (clipboard needs HTTPS)';
     }}
-  }});
-}})();
+  }} catch(e) {{
+    msg.style.color = '#e74c3c';
+    msg.textContent = '❌ ' + e.message;
+  }} finally {{
+    btn.disabled = false; btn.textContent = '📋 {label}';
+    setTimeout(() => {{ msg.textContent = ''; }}, 3500);
+  }}
+}}
 </script>
 """, height=48, scrolling=False)

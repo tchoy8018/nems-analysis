@@ -92,7 +92,7 @@ def load_model_registry(_engine):
 
 @st.cache_data(ttl=60)
 def _get_model_performance(_engine) -> pd.DataFrame:
-    """Build a unified model performance table from model_registry."""
+    """Build a clean model performance table from model_registry."""
     from sqlalchemy import text
     with _engine.connect() as conn:
         rows = conn.execute(text("""
@@ -110,39 +110,51 @@ def _get_model_performance(_engine) -> pd.DataFrame:
 
     label_map = {
         "xgboost": "XGBoost", "prophet": "Prophet",
-        "ensemble": "Ensemble", "spike_classifier": "Spike Classifier",
+        "ensemble": "Ensemble", "spike_classifier": "Spike Clf",
     }
     perf = []
     for model_name, trained_at, training_rows, rmse, mae, mape in rows:
         label = label_map.get(model_name, model_name)
         ta    = str(trained_at or "")[:16]
         tr    = f"{int(training_rows):,}" if training_rows else "—"
+        def _f(v, fmt): return fmt.format(v) if v is not None and str(v) not in ("", "None") else "N/A"
         if model_name == "spike_classifier":
+            # Stored as rmse=1-F1, mae=1-precision, mape=1-recall
             perf.append({
-                "Model":         label,
-                "Trained":       ta,
-                "Train rows":    tr,
-                "Primary":       f"F1 = {1 - float(rmse):.3f}" if rmse is not None else "N/A",
-                "Secondary":     f"Prec = {1 - float(mae):.3f}" if mae is not None else "N/A",
-                "Tertiary":      f"Recall = {1 - float(mape):.3f}" if mape is not None else "N/A",
+                "Model":   label,
+                "Trained": ta,
+                "Rows":    tr,
+                "RMSE":    _f(rmse, "F1={:.3f}").replace("RMSE=", "") if rmse is not None
+                           else "N/A",
+                "MAE":     _f(mae,  "Prec={:.3f}").replace("MAE=", "") if mae is not None
+                           else "N/A",
+                "MAPE":    _f(mape, "Rec={:.3f}").replace("MAPE=", "") if mape is not None
+                           else "N/A",
+                "Notes":   "classifier",
             })
+            # Override using correct calculation
+            perf[-1]["RMSE"] = f"F1={1-float(rmse):.3f}"  if rmse is not None else "N/A"
+            perf[-1]["MAE"]  = f"Prec={1-float(mae):.3f}" if mae  is not None else "N/A"
+            perf[-1]["MAPE"] = f"Rec={1-float(mape):.3f}" if mape is not None else "N/A"
         elif model_name == "ensemble":
             perf.append({
-                "Model":      label,
-                "Trained":    ta,
-                "Train rows": "—",
-                "Primary":    f"RMSE = S${float(rmse):.1f}/MWh" if rmse else "N/A",
-                "Secondary":  "blended (XGB+Prophet)",
-                "Tertiary":   "—",
+                "Model":   label,
+                "Trained": ta,
+                "Rows":    "—",
+                "RMSE":    f"S${float(rmse):.1f}/MWh" if rmse else "N/A",
+                "MAE":     "—",
+                "MAPE":    "—",
+                "Notes":   "inv-RMSE blend",
             })
         else:
             perf.append({
-                "Model":      label,
-                "Trained":    ta,
-                "Train rows": tr,
-                "Primary":    f"RMSE = S${float(rmse):.1f}/MWh" if rmse else "N/A",
-                "Secondary":  f"MAE = S${float(mae):.1f}/MWh"   if mae  else "N/A",
-                "Tertiary":   f"MAPE = {float(mape):.1f}%"       if mape else "N/A",
+                "Model":   label,
+                "Trained": ta,
+                "Rows":    tr,
+                "RMSE":    f"S${float(rmse):.1f}/MWh" if rmse is not None else "N/A",
+                "MAE":     f"S${float(mae):.1f}/MWh"  if mae  is not None else "N/A",
+                "MAPE":    f"{float(mape):.1f}%"       if mape is not None else "N/A",
+                "Notes":   "daily-avg" if model_name == "prophet" else "outlier-excl",
             })
     return pd.DataFrame(perf)
 
