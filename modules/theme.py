@@ -22,16 +22,17 @@ def apply_theme_css() -> None:
     is_dark = theme == "dark"
 
     bg      = "#0d1117" if is_dark else "#ffffff"
-    sbg     = "#161b22" if is_dark else "#f0f2f6"
+    sbg     = "#161b22" if is_dark else "#f6f8fa"
     tc      = "#e6edf3" if is_dark else "#1c2128"
     border  = "#30363d" if is_dark else "#d0d7de"
     primary = "#009CEA"
     inp_bg  = "#21262d" if is_dark else "#f6f8fa"
+    muted   = "#8b949e" if is_dark else "#6e7781"
 
     st.markdown(f"""
 <style>
 /* ── Backgrounds ─────────────────────────────────────── */
-.stApp, .stApp > header {{
+.stApp, .stApp > header, .main, .block-container {{
     background-color: {bg} !important;
 }}
 .main .block-container {{
@@ -46,17 +47,33 @@ body, p, span, label, div, h1, h2, h3, h4, h5, h6,
 .stMarkdown, .stMarkdown p,
 div[data-testid="stMetricValue"],
 div[data-testid="stMetricLabel"],
-div[data-testid="stMetricDelta"],
-.stCaption {{
+div[data-testid="stMetricDelta"] {{
     color: {tc} !important;
 }}
-section[data-testid="stSidebar"] * {{
+section[data-testid="stSidebar"] *:not(button) {{
     color: {tc} !important;
 }}
 
+/* ── Captions / muted text ───────────────────────────── */
+.stCaption, [data-testid="stCaptionContainer"] p {{
+    color: {muted} !important;
+}}
+
+/* ── Metrics ─────────────────────────────────────────── */
+[data-testid="stMetric"] {{
+    background-color: {sbg} !important;
+    border: 1px solid {border} !important;
+    border-radius: 8px !important;
+    padding: 12px !important;
+}}
+[data-testid="stMetricLabel"] p {{ color: {muted} !important; }}
+[data-testid="stMetricValue"]  {{ color: {primary} !important; }}
+
 /* ── Inputs ──────────────────────────────────────────── */
 .stTextInput input, .stNumberInput input, .stDateInput input,
-.stSelectbox select {{
+.stSelectbox select,
+.stSelectbox > div > div,
+.stMultiSelect > div > div {{
     background-color: {inp_bg} !important;
     color: {tc} !important;
     border-color: {border} !important;
@@ -66,14 +83,19 @@ section[data-testid="stSidebar"] * {{
 [data-testid="stDataFrame"],
 [data-testid="stDataFrame"] * {{
     color: {tc} !important;
+    background-color: {sbg} !important;
 }}
 [data-testid="stDataFrame"] .dvn-scroller {{
     background-color: {sbg} !important;
 }}
 
 /* ── Divider ─────────────────────────────────────────── */
-hr {{
-    border-color: {border} !important;
+hr {{ border-color: {border} !important; }}
+
+/* ── Code blocks ─────────────────────────────────────── */
+code, pre {{
+    background-color: {sbg} !important;
+    color: {tc} !important;
 }}
 
 /* ── Expanders ───────────────────────────────────────── */
@@ -87,6 +109,7 @@ hr {{
 [data-testid="stExpander"] {{
     background-color: {sbg} !important;
     border: 1px solid {border} !important;
+    border-radius: 6px !important;
 }}
 [data-testid="stExpander"] * {{
     color: {tc} !important;
@@ -95,7 +118,7 @@ hr {{
 /* ── Alert / info / warning / error boxes ────────────── */
 [data-testid="stAlert"] {{
     background-color: {sbg} !important;
-    color: {tc} !important;
+    border-color: {border} !important;
 }}
 [data-testid="stAlert"] p,
 [data-testid="stAlert"] div {{
@@ -112,24 +135,32 @@ button[data-baseweb="tab"][aria-selected="true"] {{
     border-bottom: 2px solid {primary} !important;
 }}
 
+/* ── Buttons ─────────────────────────────────────────── */
+.stButton > button {{
+    background-color: {sbg} !important;
+    color: {tc} !important;
+    border: 1px solid {border} !important;
+    border-radius: 6px !important;
+}}
+.stButton > button:hover {{
+    border-color: {primary} !important;
+    color: {primary} !important;
+}}
+
 /* ── Radio buttons ───────────────────────────────────── */
-[data-testid="stRadio"] label {{
+[data-testid="stRadio"] label,
+[data-testid="stRadio"] label p {{
+    color: {tc} !important;
+}}
+
+/* ── Checkboxes ──────────────────────────────────────── */
+[data-testid="stCheckbox"] label p {{
     color: {tc} !important;
 }}
 
 /* ── Sliders ─────────────────────────────────────────── */
 [data-testid="stSlider"] label,
 [data-testid="stSlider"] p {{
-    color: {tc} !important;
-}}
-
-/* ── File uploader ───────────────────────────────────── */
-[data-testid="stFileUploader"] {{
-    background-color: {sbg} !important;
-    border: 1px dashed {border} !important;
-    color: {tc} !important;
-}}
-[data-testid="stFileUploader"] * {{
     color: {tc} !important;
 }}
 
@@ -140,9 +171,28 @@ button[data-baseweb="tab"][aria-selected="true"] {{
     color: {tc} !important;
 }}
 
+/* ── File uploader ───────────────────────────────────── */
+[data-testid="stFileUploader"] {{
+    background-color: {sbg} !important;
+    border: 1px dashed {border} !important;
+}}
+[data-testid="stFileUploader"] * {{
+    color: {tc} !important;
+}}
+
 /* ── Progress bar label ──────────────────────────────── */
 [data-testid="stProgress"] p {{
     color: {tc} !important;
+}}
+
+/* ── Plotly SVG text (axis labels, ticks, legend, title) */
+.js-plotly-plot .plotly .xtick text,
+.js-plotly-plot .plotly .ytick text,
+.js-plotly-plot .plotly .g-xtitle text,
+.js-plotly-plot .plotly .g-ytitle text,
+.js-plotly-plot .plotly .legendtext,
+.js-plotly-plot .plotly .gtitle {{
+    fill: {tc} !important;
 }}
 </style>
 """, unsafe_allow_html=True)

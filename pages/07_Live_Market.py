@@ -21,6 +21,7 @@ from modules.theme import (
     add_copy_button, apply_theme_css, get_chart_layout,
     get_yaxis2_style, render_theme_toggle,
 )
+from modules.utils import _axis
 from config import COLOR_USEP, COLOR_DEMAND, COLOR_SPIKE
 
 VESTING_PRICE = 170.0   # S$/MWh
@@ -391,16 +392,12 @@ tick_labels  = [_period_to_hhmm(p) for p in tick_periods]
 
 fig_intra.update_layout(
     height=420,
-    xaxis=dict(
-        tickmode="array", tickvals=tick_periods, ticktext=tick_labels,
-        title="Time of day (SGT)",
-        **cl.get("xaxis", {}),
-    ),
-    yaxis=dict(title="USEP (S$/MWh)", **cl.get("yaxis", {})),
-    yaxis2=dict(
-        title="Demand (MW)", side="right", overlaying="y",
-        **get_yaxis2_style(),
-    ),
+    xaxis=_axis(cl.get("xaxis", {}), {
+        "tickmode": "array", "tickvals": tick_periods, "ticktext": tick_labels,
+        "title": "Time of day (SGT)",
+    }),
+    yaxis=_axis(cl.get("yaxis", {}), {"title": "USEP (S$/MWh)"}),
+    yaxis2=_axis(get_yaxis2_style(), {"title": "Demand (MW)", "side": "right", "overlaying": "y"}),
     hovermode="x unified",
     showlegend=True,
 )
@@ -439,15 +436,14 @@ else:
         hovertemplate="Date: %{y}<br>Period: %{x}<br>USEP: S$%{z:.2f}/MWh<extra></extra>",
         colorbar=dict(title="S$/MWh"),
     ))
+    fig_hm.update_layout(**cl)
     fig_hm.update_layout(
-        **cl,
         height=280,
-        xaxis=dict(
-            tickmode="array", tickvals=tick_periods, ticktext=tick_labels,
-            title="Time of day (SGT)",
-            **cl.get("xaxis", {}),
-        ),
-        yaxis=dict(title="", autorange="reversed", **cl.get("yaxis", {})),
+        xaxis=_axis(cl.get("xaxis", {}), {
+            "tickmode": "array", "tickvals": tick_periods, "ticktext": tick_labels,
+            "title": "Time of day (SGT)",
+        }),
+        yaxis=_axis(cl.get("yaxis", {}), {"title": "", "autorange": "reversed"}),
     )
     st.plotly_chart(fig_hm, use_container_width=True, key="heatmap_7day")
     add_copy_button("heatmap_7day")
@@ -505,8 +501,8 @@ else:
 
     fig_sc.update_layout(
         height=420,
-        xaxis=dict(title="Demand (MW)", **cl.get("xaxis", {})),
-        yaxis=dict(title="USEP (S$/MWh)", **cl.get("yaxis", {})),
+        xaxis=_axis(cl.get("xaxis", {}), {"title": "Demand (MW)"}),
+        yaxis=_axis(cl.get("yaxis", {}), {"title": "USEP (S$/MWh)"}),
         hovermode="closest",
     )
     st.plotly_chart(fig_sc, use_container_width=True, key="demand_scatter")

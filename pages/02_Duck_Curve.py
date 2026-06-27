@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from db import get_engine, setup_database
 from modules.analysis import duck_curve, demand_usep_threshold_analysis, demand_profile_analysis
 from modules.theme import add_copy_button, apply_theme_css, get_chart_layout, render_theme_toggle
+from modules.utils import _axis
 from config import COLOR_DEMAND, COLOR_SOLAR, COLOR_USEP
 
 
@@ -89,14 +90,13 @@ def _make_period_xaxis(cl: dict, p_min: int, p_max: int) -> dict:
     tick_periods = [p for p in range(1, 49, 6) if p_min <= p <= p_max]
     if not tick_periods:
         tick_periods = [p_min, p_max]
-    return dict(
-        tickmode="array",
-        tickvals=tick_periods,
-        ticktext=[_period_to_hhmm(p) for p in tick_periods],
-        title="Time of day (SGT)",
-        range=[p_min - 0.5, p_max + 0.5],
-        **cl.get("xaxis", {}),
-    )
+    return _axis(cl.get("xaxis", {}), {
+        "tickmode": "array",
+        "tickvals": tick_periods,
+        "ticktext": [_period_to_hhmm(p) for p in tick_periods],
+        "title": "Time of day (SGT)",
+        "range": [p_min - 0.5, p_max + 0.5],
+    })
 
 
 st.set_page_config(page_title="Duck Curve — NEMS", layout="wide")
@@ -189,7 +189,7 @@ with tab1:
     ))
     fig_dc.update_layout(
         height=400, xaxis=xax,
-        yaxis=dict(title="MW", **cl.get("yaxis", {})),
+        yaxis=_axis(cl.get("yaxis", {}), {"title": "MW"}),
         hovermode="x unified", showlegend=True,
     )
     st.plotly_chart(fig_dc, use_container_width=True, key="duck_curve")
@@ -229,7 +229,7 @@ with tab1:
         ))
     fig_bar.update_layout(
         height=320, xaxis=xax,
-        yaxis=dict(title="Avg USEP (S$/MWh)", **cl.get("yaxis", {})),
+        yaxis=_axis(cl.get("yaxis", {}), {"title": "Avg USEP (S$/MWh)"}),
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
@@ -261,7 +261,7 @@ with tab1:
     ))
     fig_sup.update_layout(
         height=340, xaxis=xax,
-        yaxis=dict(title="Avg USEP (S$/MWh)", **cl.get("yaxis", {})),
+        yaxis=_axis(cl.get("yaxis", {}), {"title": "Avg USEP (S$/MWh)"}),
         hovermode="x unified",
     )
     st.plotly_chart(fig_sup, use_container_width=True)
@@ -301,7 +301,7 @@ with tab1:
 
         fig_yoy.update_layout(
             height=380, xaxis=xax,
-            yaxis=dict(title="Net Demand (MW)", **cl.get("yaxis", {})),
+            yaxis=_axis(cl.get("yaxis", {}), {"title": "Net Demand (MW)"}),
             hovermode="x unified",
         )
         st.plotly_chart(fig_yoy, use_container_width=True)
@@ -361,8 +361,8 @@ with tab2:
             )
         fig_thresh.update_layout(
             height=360,
-            xaxis=dict(title="Demand bucket (MW)", tickangle=45, **cl2.get("xaxis", {})),
-            yaxis=dict(title="Avg USEP (S$/MWh)", **cl2.get("yaxis", {})),
+            xaxis=_axis(cl2.get("xaxis", {}), {"title": "Demand bucket (MW)", "tickangle": 45}),
+            yaxis=_axis(cl2.get("yaxis", {}), {"title": "Avg USEP (S$/MWh)"}),
         )
         st.plotly_chart(fig_thresh, use_container_width=True, key="demand_threshold")
         add_copy_button("demand_threshold")
@@ -416,12 +416,11 @@ with tab2:
             ))
         fig_dt.update_layout(
             height=360,
-            xaxis=dict(
-                tickmode="array", tickvals=tick_ps, ticktext=tick_ls,
-                title="Time of day (SGT)",
-                **cl2.get("xaxis", {}),
-            ),
-            yaxis=dict(title="Avg Demand (MW)", **cl2.get("yaxis", {})),
+            xaxis=_axis(cl2.get("xaxis", {}), {
+                "tickmode": "array", "tickvals": tick_ps, "ticktext": tick_ls,
+                "title": "Time of day (SGT)",
+            }),
+            yaxis=_axis(cl2.get("yaxis", {}), {"title": "Avg Demand (MW)"}),
             hovermode="x unified",
         )
         st.plotly_chart(fig_dt, use_container_width=True, key="daytype_demand")
@@ -465,8 +464,8 @@ with tab2:
                 ))
         fig_yoy_d.update_layout(
             height=320,
-            xaxis=dict(title="Year", **cl2.get("xaxis", {})),
-            yaxis=dict(title="Avg Demand (MW)", **cl2.get("yaxis", {})),
+            xaxis=_axis(cl2.get("xaxis", {}), {"title": "Year"}),
+            yaxis=_axis(cl2.get("yaxis", {}), {"title": "Avg Demand (MW)"}),
         )
         st.plotly_chart(fig_yoy_d, use_container_width=True, key="demand_yoy_trend")
         if cagr:

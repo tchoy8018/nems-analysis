@@ -19,6 +19,7 @@ from modules.theme import (
     apply_theme_css, get_chart_layout, get_rangeselector_style,
     render_theme_toggle,
 )
+from modules.utils import _axis
 
 SOLAR_MW = 560  # nameplate solar capacity
 
@@ -252,13 +253,12 @@ period_avg = df.groupby("period")["usep"].mean().reset_index().rename(columns={"
 period_avg["time_label"] = period_avg["period"].apply(_period_to_hhmm)
 
 tick_ps = list(range(1, 49, 6))
-xax = dict(
-    tickmode="array",
-    tickvals=tick_ps,
-    ticktext=[_period_to_hhmm(p) for p in tick_ps],
-    title="Time of day (SGT)",
-    **cl.get("xaxis", {}),
-)
+xax = _axis(cl.get("xaxis", {}), {
+    "tickmode": "array",
+    "tickvals": tick_ps,
+    "ticktext": [_period_to_hhmm(p) for p in tick_ps],
+    "title": "Time of day (SGT)",
+})
 
 fig_profile = go.Figure()
 fig_profile.update_layout(**cl)
@@ -298,7 +298,7 @@ fig_profile.add_trace(go.Scatter(
 
 fig_profile.update_layout(
     height=360, xaxis=xax,
-    yaxis=dict(title="Avg USEP (S$/MWh)", **cl.get("yaxis", {})),
+    yaxis=_axis(cl.get("yaxis", {}), {"title": "Avg USEP (S$/MWh)"}),
     hovermode="x unified",
 )
 st.plotly_chart(fig_profile, use_container_width=True, key="batt_profile")
@@ -394,8 +394,8 @@ fig_daily.add_trace(go.Scatter(
 
 fig_daily.update_layout(
     height=340,
-    xaxis=dict(
-        rangeselector=dict(
+    xaxis=_axis(cl.get("xaxis", {}), {
+        "rangeselector": dict(
             buttons=[
                 dict(count=1,  label="1M",  step="month", stepmode="backward"),
                 dict(count=3,  label="3M",  step="month", stepmode="backward"),
@@ -405,11 +405,10 @@ fig_daily.update_layout(
             ],
             **rs,
         ),
-        rangeslider=dict(visible=True, thickness=0.04),
-        type="date",
-        **cl.get("xaxis", {}),
-    ),
-    yaxis=dict(title="Daily market upside (S$'000)", **cl.get("yaxis", {})),
+        "rangeslider": dict(visible=True, thickness=0.04),
+        "type": "date",
+    }),
+    yaxis=_axis(cl.get("yaxis", {}), {"title": "Daily market upside (S$'000)"}),
     hovermode="x unified",
 )
 st.plotly_chart(fig_daily, use_container_width=True)
@@ -433,8 +432,8 @@ fig_mu.add_trace(go.Bar(
 ))
 fig_mu.update_layout(
     height=260,
-    xaxis=dict(title="Month", **cl.get("xaxis", {})),
-    yaxis=dict(title="Market upside (S$M)", **cl.get("yaxis", {})),
+    xaxis=_axis(cl.get("xaxis", {}), {"title": "Month"}),
+    yaxis=_axis(cl.get("yaxis", {}), {"title": "Market upside (S$M)"}),
     showlegend=False,
 )
 st.plotly_chart(fig_mu, use_container_width=True)
@@ -460,8 +459,8 @@ fig_hist.add_vline(x=p90,  line_color="#2ecc71", line_dash="dash",
                    annotation_text="P90", annotation_font_color="#2ecc71")
 fig_hist.update_layout(
     height=270,
-    xaxis=dict(title="Daily market upside (S$'000)", **cl.get("xaxis", {})),
-    yaxis=dict(title="Number of days", **cl.get("yaxis", {})),
+    xaxis=_axis(cl.get("xaxis", {}), {"title": "Daily market upside (S$'000)"}),
+    yaxis=_axis(cl.get("yaxis", {}), {"title": "Number of days"}),
     showlegend=False,
 )
 st.plotly_chart(fig_hist, use_container_width=True)
@@ -538,8 +537,8 @@ for i, (c, u) in enumerate(zip(plf_cfd_vals, plf_up_vals)):
     )
 fig_stack.update_layout(
     barmode="stack", height=360,
-    xaxis=dict(title="Plant Load Factor", **cl.get("xaxis", {})),
-    yaxis=dict(title="Annual Revenue (S$M)", **cl.get("yaxis", {})),
+    xaxis=_axis(cl.get("xaxis", {}), {"title": "Plant Load Factor"}),
+    yaxis=_axis(cl.get("yaxis", {}), {"title": "Annual Revenue (S$M)"}),
 )
 st.plotly_chart(fig_stack, use_container_width=True, key="revenue_stack")
 add_copy_button("revenue_stack")

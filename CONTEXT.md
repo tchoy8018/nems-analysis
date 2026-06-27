@@ -40,7 +40,22 @@
   - [x] Module 4: get_sg_calendar_features, day_type_usep_profile
   - [x] Module 5: pages/06_Data_Hub.py (5 sections)
   - [x] Module 6: 3-tab forecast (Short-term / Medium-term / Monthly Scenarios), forecast_monthly_scenarios
-- [ ] Phase 5: EMC scraper (Playwright), Streamlit Cloud deployment
+- [x] Phase 5: EMC live data integration + demand analysis
+  - [x] modules/scraper.py: fetch_live_api() via TableChart?value=10,
+        scrape_7day_chart() via Get?value=14 (HTTP only, no Playwright),
+        check_and_download_monthly_csv() (Playwright form download),
+        detect_gaps_and_fill(), get_last_data_timestamp()
+  - [x] DB: live_data_log, demand_analysis_cache tables
+  - [x] demand_usep_threshold_analysis(): inflection 6,485 MW, Spearman r=0.508
+  - [x] demand_profile_analysis(): by period/day_type/year; CAGR 1.41%
+  - [x] build_demand_features(): demand_lag_336, rolling_mean_48,
+        is_above_inflection, demand_usep_regime
+  - [x] forecasting.py: new demand features in FEATURE_COLS_BASE + build_features()
+  - [x] pages/07_Live_Market.py: intraday chart, 7-day heatmap, demand-price
+        scatter, KPIs, freshness table, 30-min auto-refresh fragment
+  - [x] pages/02_Duck_Curve.py: Tab 2 Demand–Price Analysis
+  - [x] app.py: live data sidebar widget, auto-refresh, daily CSV check
+- [ ] Phase 6: Streamlit Cloud deployment
 
 ## Technical Stack
 - Python 3.14 / Streamlit 1.58 / Plotly 6.8 / SQLAlchemy 2.0 / pandas 3.0
@@ -94,5 +109,22 @@ This spread × contracted volume = incremental annual revenue above CfD floor
 - BESS charges primarily from excess solar (midday surplus over contracted delivery)
 - Available BESS dispatch window = periods where solar > contracted delivery profile
 
+## EMC API (confirmed June 2026)
+- Real-time today: GET /api/DataSync/TableChart?value=10&fromDate=DD-Mon-YYYY&toDate=DD-Mon-YYYY&tpcValue=0
+  → data.data[0].datasets[].columns: [date_str, time_range, demand_mw, solar_mw, tcl_mw, usep, eheur, lcp]
+  → tags: "past" | "current" | "future" (future = DA forecast, do not ingest)
+- 7-day history: GET /api/DataSync/Get?value=14
+  → data.data[0]: {labels: ["DD Mon HH:MM-HH:MM" ×336], datasets: [USEP, Demand, Solar, VCP]}
+- Monthly CSV: form POST via Playwright (session token required)
+  → endpoint hint: /api/sitecore/DataSync/DataDownload
+
+## Demand Analysis Results (full dataset 2019–2026)
+- Spearman r (demand vs USEP) = 0.508
+- Inflection point: 6,485 MW (piecewise linear curve_fit)
+- Vesting price S$170/MWh exceeded in 26.1% of periods
+- Demand at vesting breach (median): 6,765 MW
+- Demand CAGR 2019–2026: 1.41% (data center-driven)
+- Peak period: P39 (19:00–19:30 SGT)
+
 ## Last Updated
-2026-06-25 (Gas price integration — SG Customs data)
+2026-06-27 (Phase 5: EMC live data + demand analysis)

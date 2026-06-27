@@ -617,6 +617,33 @@ with tab_st:
     if perf_df.empty:
         st.info("No trained models found. Click **🔄 Retrain All Models** above to train.")
     else:
+        is_dark = st.session_state.get("theme", "dark") == "dark"
+        card_bg     = "#161b22" if is_dark else "#f6f8fa"
+        card_border = "#30363d" if is_dark else "#d0d7de"
+        card_text   = "#e6edf3" if is_dark else "#1c2128"
+        card_muted  = "#8b949e" if is_dark else "#6e7781"
+
+        MODEL_ICONS = {
+            "XGBoost": "🌲", "Prophet": "📅",
+            "Ensemble": "🔀", "Spike Clf": "⚡",
+        }
+        cols = st.columns(min(len(perf_df), 4))
+        for i, row in perf_df.iterrows():
+            with cols[i % 4]:
+                icon = MODEL_ICONS.get(row["Model"], "🤖")
+                st.markdown(f"""
+<div style="border:1px solid {card_border};border-radius:8px;padding:12px;
+            margin:4px 0;background:{card_bg};color:{card_text}">
+  <b>{icon} {row['Model']}</b><br>
+  <span style="color:{card_muted};font-size:12px">Trained: {row['Trained']}</span><br>
+  <span style="color:{card_muted};font-size:12px">Rows: {row['Rows']}</span>
+  <hr style="margin:6px 0;border-color:{card_border}">
+  RMSE: <b>{row['RMSE']}</b><br>
+  MAE: <b>{row['MAE']}</b><br>
+  MAPE: <b>{row['MAPE']}</b>
+</div>
+""", unsafe_allow_html=True)
+
         st.dataframe(perf_df, use_container_width=True, hide_index=True)
         st.caption(
             "High RMSE is driven by unpredictable spike events (USEP can reach "

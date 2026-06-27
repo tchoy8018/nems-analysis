@@ -18,7 +18,7 @@ from modules.theme import (
     apply_theme_css, get_chart_layout, get_rangeselector_style,
     render_theme_toggle,
 )
-from modules.utils import get_holidays_in_range
+from modules.utils import get_holidays_in_range, _axis
 from config import COLOR_USEP, COLOR_SPIKE
 
 
@@ -209,8 +209,8 @@ fig_ts.update_layout(
     yaxis_title="USEP (S$/MWh)",
     hovermode="x unified",
     showlegend=True,
-    xaxis=dict(
-        rangeselector=dict(
+    xaxis=_axis(cl.get("xaxis", {}), {
+        "rangeselector": dict(
             buttons=[
                 dict(count=1,  label="1M",  step="month", stepmode="backward"),
                 dict(count=3,  label="3M",  step="month", stepmode="backward"),
@@ -221,10 +221,9 @@ fig_ts.update_layout(
             ],
             **rs,
         ),
-        rangeslider=dict(visible=True, thickness=0.04),
-        type="date",
-        **cl.get("xaxis", {}),
-    ),
+        "rangeslider": dict(visible=True, thickness=0.04),
+        "type": "date",
+    }),
 )
 st.plotly_chart(fig_ts, use_container_width=True, key="usep_ts")
 add_copy_button("usep_ts")
@@ -252,14 +251,13 @@ if not hm_df.empty:
     fig_hm.update_layout(**cl_base)
     fig_hm.update_layout(
         height=max(300, len(pivot) * 18 + 80),
-        xaxis=dict(
-            tickmode="array",
-            tickvals=tick_indices,
-            ticktext=tick_labels,
-            title="Time of day",
-            **cl.get("xaxis", {}),
-        ),
-        yaxis=dict(title="Month", **cl.get("yaxis", {})),
+        xaxis=_axis(cl.get("xaxis", {}), {
+            "tickmode": "array",
+            "tickvals": tick_indices,
+            "ticktext": tick_labels,
+            "title": "Time of day",
+        }),
+        yaxis=_axis(cl.get("yaxis", {}), {"title": "Month"}),
         coloraxis_colorbar=dict(title="S$/MWh"),
     )
     st.plotly_chart(fig_hm, use_container_width=True)

@@ -256,6 +256,32 @@ def get_holidays_in_range(start: date_type, end: date_type) -> list[dict]:
 # Chart template (dark default)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _axis(base: dict, overrides: dict | None = None) -> dict:
+    """
+    Merge a base axis style dict (from get_chart_layout()["xaxis" / "yaxis"])
+    with per-chart overrides without producing duplicate keyword arguments.
+
+    Usage:
+        cl = get_chart_layout()
+        xax = _axis(cl["xaxis"], {"title": "Time (SGT)", "tickvals": [1,13,25,37,48]})
+        yax = _axis(cl["yaxis"], {"title": "USEP (S$/MWh)", "rangemode": "tozero"})
+    """
+    result = {k: (dict(v) if isinstance(v, dict) else v) for k, v in base.items()}
+    if not overrides:
+        return result
+    for k, v in overrides.items():
+        if k == "title":
+            if isinstance(result.get("title"), dict):
+                result["title"] = {**result["title"], **({"text": v} if isinstance(v, str) else v)}
+            else:
+                result["title"] = {"text": v} if isinstance(v, str) else v
+        elif k in ("tickfont", "font") and isinstance(result.get(k), dict):
+            result[k] = {**result[k], **v}
+        else:
+            result[k] = v
+    return result
+
+
 CHART_TEMPLATE = {
     "layout": {
         "paper_bgcolor": "#0d1117",

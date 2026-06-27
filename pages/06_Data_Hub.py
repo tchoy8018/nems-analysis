@@ -27,6 +27,7 @@ from modules.ingestion import (
 )
 from modules.analysis import analyst_vs_actuals, vintage_comparison
 from modules.theme import add_copy_button, apply_theme_css, get_chart_layout, get_rangeselector_style, get_yaxis2_style, render_theme_toggle
+from modules.utils import _axis
 
 st.set_page_config(page_title="Data Hub", layout="wide", page_icon="🗄️")
 
@@ -462,8 +463,7 @@ else:
                        rangeslider=dict(visible=True, thickness=0.04),
                        type="date"),
             yaxis=dict(title="Weighted gas (USD/MMBtu)", side="left"),
-            yaxis2=dict(title="USEP / Floor (S$/MWh)", side="right", overlaying="y",
-                        **get_yaxis2_style()),
+            yaxis2=_axis(get_yaxis2_style(), {"title": "USEP / Floor (S$/MWh)", "side": "right", "overlaying": "y"}),
             legend=dict(x=0.01, y=0.99),
         )
         st.plotly_chart(fig2, use_container_width=True)
