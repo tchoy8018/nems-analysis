@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -599,3 +602,350 @@ def day_type_usep_profile(engine, date_from=None, date_to=None) -> pd.DataFrame:
     )
     pivot.columns.name = None
     return pivot
+
+
+# ---------------------------------------------------------------------------
+# 11. Demand–USEP threshold analysis  (Phase 5)
+# ---------------------------------------------------------------------------
+
+VESTING_PRICE = 170.0  # S$/MWh — approximate current vesting contract level
+
+
+def demand_usep_threshold_analysis(
+    engine,
+    date_from=None,
+    date_to=None,
+) -> dict:
+    """
+    Quantify the demand threshold above which USEP rises nonlinearly.
+
+    Uses piecewise-linear regression (scipy.optimize.curve_fit) to find
+    the inflection point in the demand → USEP relationship.
+
+    Returns:
+      demand_bins          — DataFrame(demand_range, avg_usep, median_usep,
+                              p90_usep, p99_usep, spike_freq_200,
+                              spike_freq_300, spike_freq_500, n_periods)
+      inflection_mw        — float  (demand at which price accelerates)
+      vesting_price        — 170.0
+      pct_above_vesting    — float
+      demand_at_vesting_breach — float  (median demand when USEP > vesting)
+      spearman_r           — float
+      spearman_p           — float
+      interpretation       — str
+    """
+    from scipy.optimize import curve_fit
+
+    where  = "usep IS NOT NULL AND demand_mw IS NOT NULL"
+    params: dict = {}
+    if date_from:
+        where += " AND date >= :dfrom"
+        params["dfrom"] = str(date_from)
+    if date_to:
+        where += " AND date <= :dto"
+        params["dto"] = str(date_to)
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT date, period, usep, demand_mw
+            FROM nems_prices WHERE {where} ORDER BY date, period
+        """), params).fetchall()
+
+    if not rows:
+        return {"demand_bins": pd.DataFrame(), "inflection_mw": None,
+                "vesting_price": VESTING_PRICE, "pct_above_vesting": None,
+                "demand_at_vesting_breach": None,
+                "spearman_r": None, "spearman_p": None, "interpretation": ""}
+
+    df = pd.DataFrame(rows, columns=["date", "period", "usep", "demand_mw"])
+    df = df.dropna(subset=["usep", "demand_mw"])
+
+    # ── Demand bins (200 MW) ──
+    d_min = (df["demand_mw"].min() // 200) * 200
+    d_max = (df["demand_mw"].max() // 200 + 1) * 200
+    bins  = np.arange(d_min, d_max + 200, 200)
+    labels = [f"{int(b)}–{int(b+200)}" for b in bins[:-1]]
+    df["demand_bin_mid"] = (df["demand_mw"] // 200) * 200 + 100
+    df["demand_bin"]     = pd.cut(df["demand_mw"], bins=bins, labels=labels, right=False)
+
+    def _spike_freq(g, threshold):
+        return 100.0 * (g > threshold).sum() / len(g) if len(g) else 0.0
+
+    bin_rows = []
+    for label, grp in df.groupby("demand_bin", observed=True):
+        if len(grp) < 5:
+            continue
+        u = grp["usep"]
+        bin_rows.append({
+            "demand_range":   str(label),
+            "avg_usep":       round(u.mean(), 2),
+            "median_usep":    round(u.median(), 2),
+            "p90_usep":       round(u.quantile(0.90), 2),
+            "p99_usep":       round(u.quantile(0.99), 2),
+            "spike_freq_200": round(_spike_freq(u, 200), 2),
+            "spike_freq_300": round(_spike_freq(u, 300), 2),
+            "spike_freq_500": round(_spike_freq(u, 500), 2),
+            "n_periods":      len(grp),
+        })
+    demand_bins = pd.DataFrame(bin_rows)
+
+    # ── Piecewise linear inflection (curve_fit on bin midpoints) ──
+    inflection_mw = None
+    if len(bin_rows) >= 4:
+        # Parse midpoints directly from demand_range strings ("4600–4800" → 4700)
+        def _parse_mid(rng: str) -> float:
+            try:
+                lo, hi = (float(x.strip()) for x in rng.replace("–", "-").split("-", 1))
+                return (lo + hi) / 2
+            except Exception:
+                return float("nan")
+
+        bin_mids  = np.array([_parse_mid(r) for r in demand_bins["demand_range"]], dtype=float)
+        avg_useps = demand_bins["avg_usep"].values.astype(float)
+        mask      = np.isfinite(bin_mids) & np.isfinite(avg_useps)
+        bin_mids  = bin_mids[mask]
+        avg_useps = avg_useps[mask]
+
+        def _piecewise(x, xb, m1, m2, b0):
+            return np.where(x < xb, m1 * (x - xb) + b0, m2 * (x - xb) + b0)
+
+        try:
+            x_mid = float(np.median(bin_mids))
+            p0    = [x_mid, 0.005, 0.05, float(np.median(avg_useps))]
+            popt, _ = curve_fit(
+                _piecewise, bin_mids, avg_useps,
+                p0=p0,
+                bounds=([bin_mids.min(), -1,  0,   0],
+                        [bin_mids.max(),  1,   2, 1000]),
+                maxfev=5000,
+            )
+            candidate = float(popt[0])
+            if np.isfinite(candidate):
+                inflection_mw = round(candidate, 0)
+        except Exception:
+            pass
+
+        # Fallback: bin with largest step-up in avg USEP
+        if inflection_mw is None or not np.isfinite(inflection_mw):
+            if len(avg_useps) > 2:
+                diffs = np.diff(avg_useps)
+                idx   = int(np.argmax(diffs))
+                inflection_mw = round(float(bin_mids[idx + 1]), 0) if idx + 1 < len(bin_mids) else None
+
+    # ── Vesting price analysis ──
+    pct_above_vesting      = round(100.0 * (df["usep"] > VESTING_PRICE).mean(), 2)
+    above_vesting          = df[df["usep"] > VESTING_PRICE]["demand_mw"]
+    demand_at_vesting_breach = round(float(above_vesting.median()), 0) if len(above_vesting) else None
+
+    # ── Spearman correlation ──
+    s_r, s_p = stats.spearmanr(
+        df["demand_mw"].to_numpy(dtype=float),
+        df["usep"].to_numpy(dtype=float),
+    )
+
+    interpretation = (
+        f"Demand–USEP Spearman r={s_r:.3f} (p<0.001). "
+    )
+    if inflection_mw:
+        interpretation += (
+            f"Price accelerates above {inflection_mw:,.0f} MW. "
+        )
+    interpretation += (
+        f"USEP exceeds vesting price (S${VESTING_PRICE}/MWh) in "
+        f"{pct_above_vesting:.1f}% of periods, typically when demand "
+        f"> {demand_at_vesting_breach:,.0f} MW."
+        if demand_at_vesting_breach else ""
+    )
+
+    # Cache result in DB
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO demand_analysis_cache
+                    (computed_at, inflection_mw, spearman_r, pct_above_vesting,
+                     demand_at_vesting_breach, date_from, date_to, n_periods)
+                VALUES (:computed_at, :inflection_mw, :spearman_r, :pct_above_vesting,
+                        :demand_at_vesting_breach, :date_from, :date_to, :n_periods)
+            """), {
+                "computed_at":              datetime.utcnow(),
+                "inflection_mw":            inflection_mw,
+                "spearman_r":               round(float(s_r), 4),
+                "pct_above_vesting":        pct_above_vesting,
+                "demand_at_vesting_breach": demand_at_vesting_breach,
+                "date_from":                str(date_from) if date_from else None,
+                "date_to":                  str(date_to)   if date_to   else None,
+                "n_periods":                len(df),
+            })
+    except Exception:
+        pass
+
+    return {
+        "demand_bins":             demand_bins,
+        "inflection_mw":           inflection_mw,
+        "vesting_price":           VESTING_PRICE,
+        "pct_above_vesting":       pct_above_vesting,
+        "demand_at_vesting_breach": demand_at_vesting_breach,
+        "spearman_r":              round(float(s_r), 4),
+        "spearman_p":              round(float(s_p), 6),
+        "interpretation":          interpretation,
+        "_raw_df":                 df,  # kept for scatter chart reuse
+    }
+
+
+# ---------------------------------------------------------------------------
+# 12. Demand profile analysis  (Phase 5)
+# ---------------------------------------------------------------------------
+
+def demand_profile_analysis(engine, date_from=None, date_to=None) -> dict:
+    """
+    Average demand by period, day_type, and year-on-year growth.
+
+    Returns:
+      period_profile    — DataFrame(period, time_label, avg_demand)
+      day_type_profile  — DataFrame(period, weekday_core, weekday_wfh,
+                           saturday, sunday, public_holiday)
+      monthly_profile   — DataFrame(year, month, avg_peak_demand)
+      demand_yoy        — DataFrame(year, avg_demand, max_demand)
+      peak_period       — int   (period with highest avg demand)
+      min_demand_period — int
+      demand_cagr       — float or None (2019–latest)
+    """
+    from modules.utils import get_sg_calendar_features, period_to_time_label
+
+    where  = "demand_mw IS NOT NULL"
+    params: dict = {}
+    if date_from:
+        where += " AND date >= :dfrom"
+        params["dfrom"] = str(date_from)
+    if date_to:
+        where += " AND date <= :dto"
+        params["dto"] = str(date_to)
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT date, period, demand_mw
+            FROM nems_prices WHERE {where} ORDER BY date, period
+        """), params).fetchall()
+
+    if not rows:
+        return {}
+
+    df = pd.DataFrame(rows, columns=["date", "period", "demand_mw"])
+    df["date"] = pd.to_datetime(df["date"])
+
+    # ── Period profile (all day-types combined) ──
+    period_profile = (
+        df.groupby("period")["demand_mw"].mean()
+        .reset_index()
+        .rename(columns={"demand_mw": "avg_demand"})
+    )
+    period_profile["time_label"] = period_profile["period"].apply(period_to_time_label)
+
+    peak_period       = int(period_profile.loc[period_profile["avg_demand"].idxmax(), "period"])
+    min_demand_period = int(period_profile.loc[period_profile["avg_demand"].idxmin(), "period"])
+
+    # ── Day-type profile ──
+    cal = get_sg_calendar_features(df["date"])
+    df["day_type"] = cal["day_type"].values
+
+    dt_profile = (
+        df.groupby(["period", "day_type"])["demand_mw"]
+        .mean()
+        .reset_index()
+        .pivot(index="period", columns="day_type", values="demand_mw")
+        .reset_index()
+    )
+    dt_profile.columns.name = None
+
+    # ── Monthly peak demand ──
+    monthly = df.copy()
+    monthly["year"]  = monthly["date"].dt.year
+    monthly["month"] = monthly["date"].dt.month
+    peak_per_day = (
+        monthly.groupby(["year", "month", monthly["date"].dt.date])["demand_mw"]
+        .max()
+        .reset_index(level=[0, 1, 2])
+    )
+    peak_per_day.columns = ["year", "month", "date", "peak_demand"]
+    monthly_profile = (
+        peak_per_day.groupby(["year", "month"])["peak_demand"]
+        .mean()
+        .reset_index()
+        .rename(columns={"peak_demand": "avg_peak_demand"})
+    )
+
+    # ── YoY demand ──
+    demand_yoy = (
+        df.groupby(df["date"].dt.year)["demand_mw"]
+        .agg(avg_demand="mean", max_demand="max")
+        .reset_index()
+        .rename(columns={"date": "year"})
+    )
+
+    # ── CAGR 2019 → latest ──
+    demand_cagr = None
+    yoy_clean = demand_yoy.dropna(subset=["avg_demand"])
+    if len(yoy_clean) >= 2:
+        first = yoy_clean.iloc[0]
+        last  = yoy_clean.iloc[-1]
+        years = float(last["year"] - first["year"])
+        if years > 0 and first["avg_demand"] > 0:
+            demand_cagr = round(
+                (last["avg_demand"] / first["avg_demand"]) ** (1 / years) - 1, 4
+            )
+
+    return {
+        "period_profile":    period_profile,
+        "day_type_profile":  dt_profile,
+        "monthly_profile":   monthly_profile,
+        "demand_yoy":        demand_yoy,
+        "peak_period":       peak_period,
+        "min_demand_period": min_demand_period,
+        "demand_cagr":       demand_cagr,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 13. Demand features for forecasting  (Phase 5)
+# ---------------------------------------------------------------------------
+
+def build_demand_features(df: pd.DataFrame, inflection_mw: Optional[float] = None) -> pd.DataFrame:
+    """
+    Add demand-based features to a NEMS DataFrame already containing demand_mw.
+    Intended to be called from forecasting.build_features().
+
+    Features added:
+      demand_lag_336           — demand same period last week
+      demand_rolling_mean_48   — rolling 24h avg demand (lagged 1 period)
+      demand_pct_of_daily_peak — demand_lag_48 / that day's peak demand_lag_48
+      is_above_inflection      — 1 if demand_lag_48 > inflection_mw
+      demand_usep_regime       — 0=low, 1=normal, 2=high (demand percentiles)
+    """
+    d = df.copy()
+    if "demand_mw" not in d.columns:
+        return d
+
+    # Expects df already sorted and indexed by dt (as in build_features)
+    d["demand_lag_336"]        = d["demand_mw"].shift(336)
+    d["demand_rolling_mean_48"] = d["demand_mw"].rolling(48).mean().shift(1)
+
+    # Percentile regime from demand_lag_48
+    if "demand_lag_48" in d.columns:
+        dl48 = d["demand_lag_48"].dropna()
+        if len(dl48):
+            p33 = dl48.quantile(0.33)
+            p67 = dl48.quantile(0.67)
+            d["demand_usep_regime"] = np.where(
+                d["demand_lag_48"] < p33, 0,
+                np.where(d["demand_lag_48"] < p67, 1, 2)
+            )
+            if inflection_mw is not None:
+                d["is_above_inflection"] = (
+                    d["demand_lag_48"] > inflection_mw
+                ).astype(int)
+            else:
+                d["is_above_inflection"] = (
+                    d["demand_lag_48"] > p67
+                ).astype(int)
+
+    return d

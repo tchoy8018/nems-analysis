@@ -11,7 +11,7 @@
 ## Database
 - Engine: SQLite (local dev) → PostgreSQL/Supabase (production)
 - File: data/nems_master.db
-- Rows: 130,704 | Range: 2019-01-01 → 2026-06-16 | Coverage: 99.96%
+- Rows: 131,060 | Range: 2019-01-01 → 2026-06-16 | Coverage: 99.96%
 - Schema: nems_prices, forecast_sources, forecast_data, model_registry,
           forecast_actuals (Phase 4), gas_prices (Phase 4 — full schema)
 

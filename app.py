@@ -1,7 +1,8 @@
+import asyncio
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from db import get_engine, setup_database
 from modules.theme import apply_theme_css, add_copy_button, get_chart_layout, render_theme_toggle
+from modules.scraper import fetch_live_api, get_last_data_timestamp, check_and_download_monthly_csv
 from config import COLOR_USEP, COLOR_SPIKE
 
 
@@ -27,6 +29,14 @@ def _check_drift_daily(_engine) -> dict:
         return check_model_drift(_engine, "xgboost", window_days=30)
     except Exception:
         return {"drift_detected": False, "recent_rmse": None, "baseline_rmse": None}
+
+
+@st.cache_data(ttl=86400)
+def _daily_csv_check(_engine_key, _engine):
+    result = asyncio.run(check_and_download_monthly_csv(
+        _engine, Path(__file__).parent / "data" / "raw"
+    ))
+    return result
 
 
 @st.cache_data(ttl=300)
@@ -112,6 +122,43 @@ def main():
             st.warning("No data loaded yet.")
 
         st.divider()
+        # ── 📡 Live Data status ───────────────────────────────────────────────
+        st.markdown("**📡 Live Data**")
+        _last_ts = get_last_data_timestamp(engine)
+        if _last_ts:
+            _mins_ago = int((datetime.now() - _last_ts).total_seconds() // 60)
+            _cp = datetime.now().hour * 2 + datetime.now().minute // 30 + 1
+            if _mins_ago < 35:
+                st.success(f"✅ Live — {_mins_ago}m ago")
+            elif _mins_ago < 120:
+                st.warning(f"⚠️ {_mins_ago}m ago")
+            else:
+                st.error(f"❌ Stale — {_mins_ago // 60}h ago")
+            st.caption(f"P{min(48,_cp)} ({(_cp - 1) * 30 // 60:02d}:{(_cp - 1) * 30 % 60:02d} SGT)")
+        else:
+            st.caption("No live timestamp yet")
+
+        if st.button("🔄 Fetch latest", key="home_fetch_live", use_container_width=True):
+            with st.spinner("Fetching…"):
+                _res = asyncio.run(fetch_live_api(engine))
+                _pn  = _res.get("periods_new", 0)
+                if _pn > 0:
+                    st.success(f"+{_pn} periods")
+                    st.cache_data.clear()
+                    st.rerun()
+                elif _res.get("error"):
+                    st.error(_res["error"][:80])
+                else:
+                    st.info("Up to date")
+
+        # ── Daily CSV check ───────────────────────────────────────────────────
+        _csv = _daily_csv_check(str(engine.url), engine)
+        if _csv.get("downloaded"):
+            st.success(f"📥 +{_csv.get('rows_added',0)} rows (monthly CSV)")
+            if _csv.get("drift_check", {}).get("retrain_recommended"):
+                st.warning("⚠️ Drift — retrain recommended")
+
+        st.divider()
         drift = _check_drift_daily(engine)
         if drift.get("drift_detected"):
             _rr = drift.get("recent_rmse")
@@ -129,6 +176,20 @@ def main():
         st.page_link("pages/03_Forecast.py", label="Forecast", icon="🔮")
         st.page_link("pages/04_Battery_Arbitrage.py", label="Battery Arbitrage", icon="🔋")
         st.page_link("pages/05_Scenario_Comparison.py", label="Scenario Comparison", icon="📈")
+        st.page_link("pages/06_Data_Hub.py", label="Data Hub", icon="📡")
+        st.page_link("pages/07_Live_Market.py", label="Live Market", icon="📡")
+
+    # --- Auto-refresh live data every 30 minutes ---
+    @st.fragment(run_every=1800)
+    def _auto_refresh_home():
+        try:
+            _r = asyncio.run(fetch_live_api(engine))
+            if _r.get("periods_new", 0) > 0:
+                st.cache_data.clear()
+        except Exception:
+            pass
+
+    _auto_refresh_home()
 
     # --- Home ---
     st.title("NEMS Analytics — Singa Renewables Intelligence Platform")

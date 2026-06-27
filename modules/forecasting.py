@@ -32,7 +32,9 @@ FEATURE_COLS_BASE = [
     "period_sin", "period_cos", "month_sin", "month_cos",
     "usep_lag_48", "usep_lag_336", "usep_lag_672",
     "usep_rolling_mean_48", "usep_rolling_std_48",
-    "demand_lag_48", "solar_lag_48",
+    "demand_lag_48", "demand_lag_336", "demand_rolling_mean_48",
+    "is_above_inflection", "demand_usep_regime",
+    "solar_lag_48",
 ]
 GAS_FEATURE_COLS = [
     "gas_price_monthly", "gas_price_lag1m", "gas_price_lag2m",
@@ -73,6 +75,28 @@ def _load_gas_monthly(engine) -> pd.DataFrame:
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Feature engineering
 # ─────────────────────────────────────────────────────────────────────────────
+
+_INFLECTION_CACHE: dict = {}   # {engine_url: inflection_mw}
+
+
+def _get_inflection_cache(engine) -> float | None:
+    """Return cached inflection_mw for the DB; compute once if missing."""
+    key = str(engine.url)
+    if key not in _INFLECTION_CACHE:
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(text("""
+                    SELECT inflection_mw FROM demand_analysis_cache
+                    ORDER BY computed_at DESC LIMIT 1
+                """)).fetchone()
+            if row and row[0] is not None:
+                _INFLECTION_CACHE[key] = float(row[0])
+            else:
+                _INFLECTION_CACHE[key] = None
+        except Exception:
+            _INFLECTION_CACHE[key] = None
+    return _INFLECTION_CACHE[key]
+
 
 def build_features(df: pd.DataFrame, engine=None) -> pd.DataFrame:
     """
@@ -130,10 +154,40 @@ def build_features(df: pd.DataFrame, engine=None) -> pd.DataFrame:
     d["usep_rolling_mean_48"] = d["usep"].rolling(48).mean().shift(1)
     d["usep_rolling_std_48"]  = d["usep"].rolling(48).std().shift(1)
 
-    d["demand_lag_48"] = d["demand_mw"].shift(48) if "demand_mw" in d.columns else np.nan
-    d["solar_lag_48"]  = d["solar_mw"].shift(48)  if "solar_mw"  in d.columns else np.nan
+    d["demand_lag_48"]         = d["demand_mw"].shift(48)  if "demand_mw" in d.columns else np.nan
+    d["demand_lag_336"]        = d["demand_mw"].shift(336) if "demand_mw" in d.columns else np.nan
+    d["demand_rolling_mean_48"] = (
+        d["demand_mw"].rolling(48).mean().shift(1) if "demand_mw" in d.columns else np.nan
+    )
+    d["solar_lag_48"]          = d["solar_mw"].shift(48) if "solar_mw" in d.columns else np.nan
 
     d = d.reset_index()
+
+    # ── Demand-regime features (requires inflection_mw from analysis) ──
+    if "demand_lag_48" in d.columns:
+        try:
+            if engine is not None:
+                from modules.analysis import demand_usep_threshold_analysis
+                _cache = _get_inflection_cache(engine)
+                infl_mw = _cache
+            else:
+                infl_mw = None
+        except Exception:
+            infl_mw = None
+
+        dl48 = d["demand_lag_48"].dropna()
+        if len(dl48):
+            p33 = dl48.quantile(0.33)
+            p67 = dl48.quantile(0.67)
+            d["demand_usep_regime"] = np.where(
+                d["demand_lag_48"] < p33, 0,
+                np.where(d["demand_lag_48"] < p67, 1, 2),
+            ).astype(float)
+            threshold = infl_mw if infl_mw is not None else p67
+            d["is_above_inflection"] = (d["demand_lag_48"] > threshold).astype(float)
+        else:
+            d["demand_usep_regime"]  = np.nan
+            d["is_above_inflection"] = np.nan
 
     required_lags = ["usep_lag_48", "usep_lag_336", "usep_rolling_mean_48"]
     d = d.dropna(subset=required_lags + [TARGET]).reset_index(drop=True)

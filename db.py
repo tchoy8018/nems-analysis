@@ -177,6 +177,35 @@ model_evolution = Table(
     Column("notes",         Text),
 )
 
+# NEW — Phase 5 live data integration
+live_data_log = Table(
+    "live_data_log", metadata,
+    Column("id",              Integer,  primary_key=True, autoincrement=True),
+    Column("fetched_at",      DateTime),
+    Column("source",          Text),        # 'live_api' | 'playwright' | 'monthly_csv'
+    Column("periods_fetched", Integer, default=0),
+    Column("periods_new",     Integer, default=0),
+    Column("latest_date",     Date),
+    Column("latest_period",   Integer),
+    Column("latest_usep",     Float),
+    Column("latest_demand_mw", Float),
+    Column("error",           Text),
+    Column("duration_ms",     Integer),
+)
+
+demand_analysis_cache = Table(
+    "demand_analysis_cache", metadata,
+    Column("id",                       Integer, primary_key=True, autoincrement=True),
+    Column("computed_at",              DateTime),
+    Column("inflection_mw",            Float),
+    Column("spearman_r",               Float),
+    Column("pct_above_vesting",        Float),
+    Column("demand_at_vesting_breach", Float),
+    Column("date_from",                Date),
+    Column("date_to",                  Date),
+    Column("n_periods",                Integer),
+)
+
 # Indexes
 Index("idx_nems_date",        nems_prices.c.date)
 Index("idx_nems_period",      nems_prices.c.period)
@@ -188,6 +217,8 @@ Index("idx_gas_date",         gas_prices.c.price_date)
 Index("idx_bt_model",         backtest_runs.c.model_name)
 Index("idx_plog_model_date",  prediction_log.c.model_name, prediction_log.c.forecast_date)
 Index("idx_evo_model",        model_evolution.c.model_name)
+Index("idx_ldl_fetched_at",   live_data_log.c.fetched_at)
+Index("idx_dac_computed_at",  demand_analysis_cache.c.computed_at)
 
 
 def _add_column_safe(conn, table: str, column: str, definition: str) -> None:
